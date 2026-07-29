@@ -707,9 +707,8 @@ export default function (pi: ExtensionAPI) {
             }
 
             if (matchesKey(data, "r")) {
+              // Discard session overrides and restore the saved ~/.pi/voice/config.json values
               session = {};
-              // Write full defaults (including agent_end event) back to disk
-              saveConfig({ ...DEFAULT_CONFIG });
               defaults = loadConfig();
               persistSession();
               enabled = defaults.enabled;
