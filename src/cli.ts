@@ -1,4 +1,8 @@
-#!/usr/bin/env -S node --import jiti
+#!/usr/bin/env node
+
+// Register jiti via Node module resolution so it is found regardless of cwd
+// or npm hoisting (unlike `--import jiti` from cwd or a hardcoded path).
+import "jiti/register";
 
 /**
  * pi-voice CLI — Manage the Kokoro TTS server and models.
