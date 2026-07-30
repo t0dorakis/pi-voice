@@ -20,6 +20,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { cleanTextForSpeech } from "./text.ts";
 
 // ── Configuration ──────────────────────────────────────────────────
 const MODEL_ID = "onnx-community/Kokoro-82M-v1.0-ONNX";
@@ -520,7 +521,12 @@ async function handleTTS(req: IncomingMessage, res: ServerResponse) {
     const rawBody = await readBody(req);
     const body = JSON.parse(rawBody);
     const text = (body.text as string | undefined)?.trim();
-    const label = text ? `"${text.slice(0, 40)}${text.length > 40 ? "..." : ""}"` : "(empty)";
+    // Speak words, not markdown symbols — server-side so every client
+    // (tts tool, auto-TTS, /voice sample) gets clean speech for free.
+    const spokenText = text ? cleanTextForSpeech(text) : "";
+    const label = spokenText
+      ? `"${spokenText.slice(0, 40)}${spokenText.length > 40 ? "..." : ""}"`
+      : "(empty)";
 
     const result = await enqueueTTS(label, req, res, async () => {
       if (!tts || !activeDtype) {
@@ -530,7 +536,7 @@ async function handleTTS(req: IncomingMessage, res: ServerResponse) {
         } as const;
       }
 
-      if (!text) {
+      if (!spokenText) {
         return { error: "Missing or empty 'text' field", status: 400 } as const;
       }
 
@@ -538,10 +544,10 @@ async function handleTTS(req: IncomingMessage, res: ServerResponse) {
       const speed = Number(body.speed ?? 1.0);
 
       console.log(
-        `[pi-voice] Synthesizing: "${text.slice(0, 60)}${text.length > 60 ? "..." : ""}" (voice=${voice}, speed=${speed}, dtype=${activeDtype})`,
+        `[pi-voice] Synthesizing: "${spokenText.slice(0, 60)}${spokenText.length > 60 ? "..." : ""}" (voice=${voice}, speed=${speed}, dtype=${activeDtype})`,
       );
 
-      const audio = await tts.generate(text, {
+      const audio = await tts.generate(spokenText, {
         voice: voice as keyof typeof tts.voices,
         speed,
       });

@@ -72,3 +72,31 @@ export function extractTextContent(content: any[] | undefined): string {
       .join("\n")
   );
 }
+
+/**
+ * Strip markdown syntax so the synthesizer speaks words, not symbols.
+ * Fenced code blocks are dropped entirely (spoken code is noise); inline
+ * code keeps its text; links/images keep their label/alt. Applied
+ * server-side to every /tts request so all clients benefit.
+ */
+export function cleanTextForSpeech(text: string): string {
+  return text
+    .replace(/```[\s\S]*?```/g, " ") // fenced code blocks (dropped)
+    .replace(/`([^`]+)`/g, "$1") // inline code keeps its text
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1") // images keep alt text
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1") // links keep their label
+    .replace(/^\s{0,3}#{1,6}\s+/gm, "") // heading markers
+    .replace(/^\s*>\s?/gm, "") // blockquote markers
+    .replace(/^\s*(?:[-*+]|\d+\.)\s+/gm, "") // list bullets / numbering
+    .replace(/(^|[\s([{])\*\*\*([^*\n]+?)\*\*\*(?=$|[\s.,!?;:)}\]])/g, "$1$2")
+    .replace(/(^|[\s([{])\*\*([^*\n]+?)\*\*(?=$|[\s.,!?;:)}\]])/g, "$1$2")
+    .replace(/(^|[\s([{])\*([^*\n]+?)\*(?=$|[\s.,!?;:)}\]])/g, "$1$2")
+    .replace(/(^|[\s([{])___([^_\n]+?)___(?=$|[\s.,!?;:)}\]])/g, "$1$2")
+    .replace(/(^|[\s([{])__([^_\n]+?)__(?=$|[\s.,!?;:)}\]])/g, "$1$2")
+    .replace(/(^|[\s([{])_([^_\n]+?)_(?=$|[\s.,!?;:)}\]])/g, "$1$2")
+    .replace(/~~([^~]+)~~/g, "$1") // strikethrough
+    .replace(/^\s*(?:[-*_]\s*){3,}$/gm, "") // horizontal rules
+    .replace(/[ \t]{2,}/g, " ") // collapse leftover spacing
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}

@@ -278,6 +278,23 @@ describe("Kokoro TTS Server", () => {
       assert.equal(status, 400);
     });
 
+    it("rejects text with nothing speakable after markdown cleanup (fence only)", async () => {
+      const { status } = await post("/tts", { text: "```ts\nconst x = 1;\n```" });
+      assert.equal(status, 400);
+    });
+
+    it("synthesizes markdown-rich text (cleanup happens server-side)", async () => {
+      const { status, body } = await fetchBinary("/tts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: "## Status\n\nThe **build** passed. See [the logs](https://example.com) and `npm test`.",
+        }),
+      });
+      assert.equal(status, 200);
+      assertWav(body);
+    });
+
     it("generates WAV audio with correct headers", async () => {
       const { status, headers, body } = await fetchBinary("/tts", {
         method: "POST",
