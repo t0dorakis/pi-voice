@@ -21,9 +21,10 @@
     "url": "https://github.com/S1M0N38/pi-voice"
   },
   "bin": {
-    "pi-voice": "./src/cli.ts"
+    "pi-voice": "./bin/pi-voice.mjs"
   },
   "files": [
+    "bin",
     "extensions",
     "src",
     "README.md",
@@ -40,7 +41,7 @@
     "access": "public"
   },
   "scripts": {
-    "test": "node --import jiti extensions/server.test.ts",
+    "test": "node --import jiti/register extensions/server.test.ts",
     "test:tui": "bash tests/tui.sh",
     "test:toggle": "bash tests/toggle.sh",
     "test:queue": "bash tests/queue.sh",
@@ -49,9 +50,9 @@
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",
     "typecheck": "tsc --noEmit",
-    "cli": "node --import jiti src/cli.ts",
-    "server": "node --import jiti extensions/server.ts",
-    "prepare": "node --import jiti src/prepare.js"
+    "cli": "node --import jiti/register src/cli.ts",
+    "server": "node --import jiti/register extensions/server.ts",
+    "prepare": "node src/prepare.js"
   },
   "dependencies": {
     "jiti": "^2.4.2",
