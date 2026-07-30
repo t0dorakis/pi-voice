@@ -41,12 +41,24 @@ const MANIFEST_PATH = join(VOICE_DIR, "manifest.json");
 // Persistent cache outside node_modules — survives npm install cycles.
 const CACHE_DIR = join(VOICE_DIR, "cache");
 
+// ONNX filename per dtype, matching transformers.js's
+// DEFAULT_DTYPE_SUFFIX_MAPPING: fp32 has no suffix, q8 is "_quantized".
+// (Getting this wrong makes isDtypeDownloaded lie: fp32/q8 could never be
+// detected as downloaded, so activate/delete/reporting all misbehaved.)
+const DTYPE_FILE_SUFFIX: Record<DType, string> = {
+  q4: "_q4",
+  q4f16: "_q4f16",
+  q8: "_quantized",
+  fp16: "_fp16",
+  fp32: "",
+};
+
 function getOnnxPath(dtype: DType): string {
-  // transformers.js stores: cache/<org>/<repo>/onnx/model_<dtype>.onnx
+  // transformers.js stores: cache/<org>/<repo>/onnx/model<suffix>.onnx
   const parts = MODEL_ID.split("/");
   const org = parts[0] ?? "";
   const repo = parts[1] ?? "";
-  return resolve(CACHE_DIR, org, repo, "onnx", `model_${dtype}.onnx`);
+  return resolve(CACHE_DIR, org, repo, "onnx", `model${DTYPE_FILE_SUFFIX[dtype]}.onnx`);
 }
 
 function isDtypeDownloaded(dtype: DType): boolean {
@@ -126,6 +138,33 @@ async function importKokoro() {
 // ── Model lifecycle ────────────────────────────────────────────────
 // Ensures only one model is ever in memory at a time.
 
+// Serialize all load/download/delete ops. Concurrent ops race the
+// active-model state (tts/activeDtype/loading) and can corrupt the shared
+// cache — e.g. a load reading files that a concurrent download is rewriting.
+// Every model op chains behind the previous one instead of erroring.
+let modelLock: Promise<unknown> = Promise.resolve();
+function withModelLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = modelLock.then(fn, fn);
+  modelLock = run.then(
+    () => {},
+    () => {},
+  );
+  return run;
+}
+
+// A cached file that won't parse is corrupt/partial — drop it so the next
+// attempt re-downloads instead of failing forever.
+function deleteCorruptDtype(dtype: DType) {
+  try {
+    const p = getOnnxPath(dtype);
+    if (existsSync(p)) rmSync(p, { force: true });
+    markDeleted(dtype);
+    console.warn(`[pi-voice] Removed corrupt/partial model file for ${dtype}.`);
+  } catch {
+    /* ignore */
+  }
+}
+
 async function unloadModel(): Promise<void> {
   if (!tts) return;
   const oldDtype = activeDtype;
@@ -146,11 +185,10 @@ async function unloadModel(): Promise<void> {
   console.log(`[pi-voice] Model unloaded (${oldDtype}).`);
 }
 
-async function loadModel(dtype: DType): Promise<import("kokoro-js").KokoroTTS> {
+async function loadModelImpl(dtype: DType): Promise<import("kokoro-js").KokoroTTS> {
   await importKokoro();
 
   if (tts && activeDtype === dtype) return tts;
-  if (loading) throw new Error("Model is currently loading, please retry");
 
   if (!isDtypeDownloaded(dtype)) {
     throw new Error(
@@ -168,10 +206,15 @@ async function loadModel(dtype: DType): Promise<import("kokoro-js").KokoroTTS> {
     env.cacheDir = CACHE_DIR;
     env.allowLocalModels = true;
     env.useBrowserCache = false;
-    tts = await KokoroTTS.from_pretrained(MODEL_ID, {
-      dtype,
-      device: "cpu",
-    });
+    try {
+      tts = await KokoroTTS.from_pretrained(MODEL_ID, {
+        dtype,
+        device: "cpu",
+      });
+    } catch (err) {
+      deleteCorruptDtype(dtype);
+      throw err;
+    }
     activeDtype = dtype;
     const voiceCount = Object.keys(tts.voices).length;
     console.log(`[pi-voice] Model loaded (${dtype}). ${voiceCount} voices available.`);
@@ -181,53 +224,86 @@ async function loadModel(dtype: DType): Promise<import("kokoro-js").KokoroTTS> {
   }
 }
 
+async function loadModel(dtype: DType): Promise<import("kokoro-js").KokoroTTS> {
+  return withModelLock(() => loadModelImpl(dtype));
+}
+
 async function downloadModel(dtype: DType): Promise<void> {
-  await importKokoro();
+  return withModelLock(async () => {
+    // Another op may have downloaded it while we waited for the lock.
+    if (isDtypeDownloaded(dtype)) {
+      markDownloaded(dtype);
+      await loadModelImpl(dtype);
+      return;
+    }
 
-  console.log(`[pi-voice] Downloading model: ${MODEL_ID} (dtype=${dtype}) ...`);
-  const { env } = await import("@huggingface/transformers");
-  env.cacheDir = CACHE_DIR;
-  const instance = await KokoroTTS.from_pretrained(MODEL_ID, {
-    dtype,
-    device: "cpu",
+    await importKokoro();
+
+    console.log(`[pi-voice] Downloading model: ${MODEL_ID} (dtype=${dtype}) ...`);
+    const { env } = await import("@huggingface/transformers");
+    env.cacheDir = CACHE_DIR;
+    let instance: import("kokoro-js").KokoroTTS;
+    try {
+      instance = await KokoroTTS.from_pretrained(MODEL_ID, {
+        dtype,
+        device: "cpu",
+      });
+    } catch (err) {
+      deleteCorruptDtype(dtype);
+      throw err;
+    }
+    console.log(`[pi-voice] Download complete (${dtype}).`);
+    markDownloaded(dtype);
+
+    // Unload the current model first, then activate the new one
+    // (only one model in memory at a time)
+    await unloadModel();
+    tts = instance;
+    activeDtype = dtype;
+    console.log(`[pi-voice] Auto-activated ${dtype}.`);
   });
-  console.log(`[pi-voice] Download complete (${dtype}).`);
-  markDownloaded(dtype);
-
-  // Unload the current model first, then activate the new one
-  // (only one model in memory at a time)
-  await unloadModel();
-  tts = instance;
-  activeDtype = dtype;
-  console.log(`[pi-voice] Auto-activated ${dtype}.`);
 }
 
 async function downloadOnlyModel(dtype: DType): Promise<void> {
-  await importKokoro();
+  return withModelLock(async () => {
+    // Another op may have downloaded it while we waited for the lock.
+    if (isDtypeDownloaded(dtype)) {
+      markDownloaded(dtype);
+      return;
+    }
 
-  console.log(`[pi-voice] Downloading model (no activate): ${MODEL_ID} (dtype=${dtype}) ...`);
-  const { env } = await import("@huggingface/transformers");
-  env.cacheDir = CACHE_DIR;
-  const instance = await KokoroTTS.from_pretrained(MODEL_ID, {
-    dtype,
-    device: "cpu",
+    await importKokoro();
+
+    console.log(`[pi-voice] Downloading model (no activate): ${MODEL_ID} (dtype=${dtype}) ...`);
+    const { env } = await import("@huggingface/transformers");
+    env.cacheDir = CACHE_DIR;
+    let instance: import("kokoro-js").KokoroTTS;
+    try {
+      instance = await KokoroTTS.from_pretrained(MODEL_ID, {
+        dtype,
+        device: "cpu",
+      });
+    } catch (err) {
+      deleteCorruptDtype(dtype);
+      throw err;
+    }
+    console.log(`[pi-voice] Download complete (${dtype}). Disposing temporary instance...`);
+    markDownloaded(dtype);
+
+    // Immediately dispose — kokoro-js always loads into memory,
+    // so we release it right away to keep the single-model invariant.
+    try {
+      await instance.model.dispose();
+    } catch (err) {
+      console.warn(
+        `[pi-voice] Error disposing download instance: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    if (typeof global.gc === "function") {
+      global.gc();
+    }
+    console.log(`[pi-voice] Model ${dtype} saved to disk (not activated).`);
   });
-  console.log(`[pi-voice] Download complete (${dtype}). Disposing temporary instance...`);
-  markDownloaded(dtype);
-
-  // Immediately dispose — kokoro-js always loads into memory,
-  // so we release it right away to keep the single-model invariant.
-  try {
-    await instance.model.dispose();
-  } catch (err) {
-    console.warn(
-      `[pi-voice] Error disposing download instance: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
-  if (typeof global.gc === "function") {
-    global.gc();
-  }
-  console.log(`[pi-voice] Model ${dtype} saved to disk (not activated).`);
 }
 
 // ── Helpers ────────────────────────────────────────────────────────
@@ -333,17 +409,20 @@ async function handleModelsDelete(req: IncomingMessage, res: ServerResponse) {
       return;
     }
 
-    // Unload and dispose if it's the active model
-    if (activeDtype === dtype) {
-      await unloadModel();
-    }
+    // Unload + delete under the model lock so it can't race a concurrent load.
+    await withModelLock(async () => {
+      // Unload and dispose if it's the active model
+      if (activeDtype === dtype) {
+        await unloadModel();
+      }
 
-    // Delete the ONNX file
-    const onnxPath = getOnnxPath(dtype);
-    if (existsSync(onnxPath)) {
-      rmSync(onnxPath, { force: true });
-    }
-    markDeleted(dtype);
+      // Delete the ONNX file
+      const onnxPath = getOnnxPath(dtype);
+      if (existsSync(onnxPath)) {
+        rmSync(onnxPath, { force: true });
+      }
+      markDeleted(dtype);
+    });
     console.log(`[pi-voice] Deleted model: ${dtype}`);
     json(res, { message: `Model ${dtype} deleted`, dtype });
   } catch (err) {

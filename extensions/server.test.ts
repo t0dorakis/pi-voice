@@ -15,13 +15,18 @@
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { dirname, resolve } from "node:path";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SERVER_SCRIPT = resolve(__dirname, "server.ts");
 const PACKAGE_ROOT = resolve(__dirname, "..");
+// See src/cli.ts: the spawned server is a .ts file, so the child Node
+// process needs jiti's loader hooks registered by absolute path.
+const JITI_REGISTER = resolve(PACKAGE_ROOT, "node_modules", "jiti", "lib", "jiti-register.mjs");
 
 const TEST_PORT = 18381;
 const TEST_HOST = "127.0.0.1";
@@ -99,7 +104,7 @@ describe("Kokoro TTS Server", () => {
   before(async () => {
     serverProcess = spawn(
       "node",
-      ["--import", "jiti", SERVER_SCRIPT, "--host", TEST_HOST, "--port", String(TEST_PORT)],
+      ["--import", JITI_REGISTER, SERVER_SCRIPT, "--host", TEST_HOST, "--port", String(TEST_PORT)],
       { cwd: PACKAGE_ROOT, stdio: ["ignore", "pipe", "pipe"] },
     );
 
@@ -473,6 +478,59 @@ describe("Kokoro TTS Server", () => {
     });
   });
 
+  // ── 4b. Model lock (concurrent ops serialize) ──────────────────
+
+  describe("Model lock", () => {
+    it("concurrent activates of a real model load all succeed (no 'currently loading' 500)", async () => {
+      // Force a real load: unload first so every request does actual work.
+      await ensureModelUnloaded();
+
+      // Fire a burst of concurrent activates. Before the model lock, all but
+      // the first failed with 500 "Model is currently loading, please retry".
+      const results = await Promise.all(
+        Array.from({ length: 5 }, () => post("/models/activate", { dtype: TEST_DTYPE })),
+      );
+      for (const { status, data } of results) {
+        assert.equal(status, 200, `expected 200, got ${status}: ${JSON.stringify(data)}`);
+      }
+
+      const health = await fetchJson<{ modelLoaded: boolean; activeDtype: string | null }>(
+        "/health",
+      );
+      assert.equal(health.data.modelLoaded, true);
+      assert.equal(health.data.activeDtype, TEST_DTYPE);
+    });
+
+    it("concurrent downloads of an already-downloaded model stay consistent", async () => {
+      await ensureModelLoaded();
+
+      const results = await Promise.all([
+        post("/models/download", { dtype: TEST_DTYPE }),
+        post("/models/download", { dtype: TEST_DTYPE }),
+        post("/models/download", { dtype: TEST_DTYPE, activate: false }),
+        post("/models/activate", { dtype: TEST_DTYPE }),
+      ]);
+      for (const { status, data } of results) {
+        assert.equal(status, 200, `expected 200, got ${status}: ${JSON.stringify(data)}`);
+      }
+
+      const health = await fetchJson<{ modelLoaded: boolean; activeDtype: string | null }>(
+        "/health",
+      );
+      assert.equal(health.data.modelLoaded, true);
+      assert.equal(health.data.activeDtype, TEST_DTYPE);
+
+      // TTS still works after the concurrent burst.
+      const tts = await fetchBinary("/tts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: "After concurrent ops" }),
+      });
+      assert.equal(tts.status, 200);
+      assertWav(tts.body);
+    });
+  });
+
   // ── 5. Lifecycle (single-model invariant) ────────────────────
 
   describe("Lifecycle", () => {
@@ -548,6 +606,48 @@ describe("Kokoro TTS Server", () => {
       }>("/health");
       assert.equal(health.data.modelLoaded, false);
       assert.equal(health.data.activeDtype, null);
+    });
+  });
+
+  // ── 6. Corrupt cache self-heal ─────────────────────────────────
+
+  describe("Corrupt cache", () => {
+    const GARBAGE_DTYPE = "q8";
+    const garbagePath = join(
+      homedir(),
+      ".pi",
+      "voice",
+      "cache",
+      "onnx-community",
+      "Kokoro-82M-v1.0-ONNX",
+      "onnx",
+      // q8 maps to model_quantized.onnx (transformers.js dtype suffix mapping)
+      "model_quantized.onnx",
+    );
+
+    it("a corrupt cached model is deleted so the next attempt re-downloads", async () => {
+      // Plant a garbage file where the real ONNX would live. The
+      // transformers.js cache is presence-based, so the server treats it as
+      // downloaded and fails parsing it.
+      mkdirSync(dirname(garbagePath), { recursive: true });
+      writeFileSync(garbagePath, "this is not a valid ONNX protobuf");
+
+      // Activate must fail — the file cannot be parsed.
+      const { status } = await post("/models/activate", { dtype: GARBAGE_DTYPE });
+      assert.equal(status, 500);
+
+      // Self-heal: the corrupt file is gone ...
+      assert.equal(existsSync(garbagePath), false, "corrupt file should be removed");
+
+      // ... and the dtype is reported as not downloaded (so it re-downloads).
+      const models = await fetchJson<{
+        models: Record<string, { downloaded: boolean }>;
+      }>("/models");
+      assert.equal(models.data.models[GARBAGE_DTYPE]?.downloaded, false);
+
+      // Server survived and still serves requests.
+      const health = await fetchJson<{ status: string }>("/health");
+      assert.equal(health.data.status, "ok");
     });
   });
 });
