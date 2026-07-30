@@ -41,7 +41,9 @@
     "access": "public"
   },
   "scripts": {
-    "test": "node --import jiti/register extensions/server.test.ts",
+    "test": "npm run test:unit && node --import jiti/register extensions/server.test.ts",
+    "test:unit": "node --import jiti/register --test extensions/text.test.ts extensions/config.test.ts extensions/audio.test.ts",
+    "test:events": "node --import jiti/register extensions/events.test.ts",
     "test:tui": "bash tests/tui.sh",
     "test:toggle": "bash tests/toggle.sh",
     "test:queue": "bash tests/queue.sh",

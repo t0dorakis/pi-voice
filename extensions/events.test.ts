@@ -179,6 +179,7 @@ function createMockPi() {
 
   return {
     _emitted,
+    _entries: [] as Array<{ customType: string; data: unknown }>,
     events: {
       emit(event: string, data: unknown) {
         _emitted.push({ event, data });
@@ -203,7 +204,10 @@ function createMockPi() {
     on(event: string, handler: (...args: any[]) => Promise<void>) {
       piEventHandlers[event] = handler;
     },
-    appendEntry() {},
+    appendEntry(customType: string, data: unknown) {
+      // biome-ignore lint/suspicious/noExplicitAny: captured on the mock object
+      (this as any)._entries.push({ customType, data });
+    },
   };
 }
 
@@ -420,15 +424,24 @@ describe("pi-voice event system", () => {
       assert.equal(second.enabled, true, "Second toggle should enable");
     });
 
-    it("persists toggle to config file", async () => {
+    it("keeps toggle session-only: config file unchanged, session entry appended", async () => {
       const pi = createMockPi();
       // biome-ignore lint/suspicious/noExplicitAny: mock pi cast
       extensionFactory(pi as any);
 
       await shortcuts["alt+v"].handler(createMockCtx());
 
+      // Session-only settings (a1268d3): the config file is NOT touched ...
       const saved = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
-      assert.equal(saved.enabled, false, "Config file should reflect toggle");
+      assert.equal(saved.enabled, true, "Config file should be unchanged by alt+v");
+
+      // ... the override lives in a voice-session entry instead.
+      const entries = pi._entries.filter(
+        (e: { customType: string }) => e.customType === "voice-session",
+      );
+      assert.ok(entries.length >= 1, "Expected a voice-session entry");
+      const last = entries[entries.length - 1].data as { enabled?: boolean };
+      assert.equal(last.enabled, false);
     });
 
     it("voice:config payload has exactly { enabled, voice, speed }", async () => {

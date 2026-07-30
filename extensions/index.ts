@@ -28,8 +28,7 @@
  *     Uses session overrides > global defaults.
  */
 
-import { execFile as execFileCb } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -41,39 +40,15 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { matchesKey } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-
-// ── Types ──────────────────────────────────────────────────────────
-
-interface ModelConfig {
-  provider: string;
-  id: string;
-}
-
-type EventConfig = SummarizeEventConfig | DirectEventConfig;
-
-interface SummarizeEventConfig {
-  prompt: string;
-  model?: ModelConfig;
-}
-
-interface DirectEventConfig {
-  text: string;
-}
-
-interface FullVoiceConfig {
-  enabled: boolean;
-  voice: string;
-  speed: number;
-  host: string;
-  port: number;
-  events?: Record<string, EventConfig>;
-}
-
-interface VoiceSessionState {
-  enabled?: boolean;
-  voice?: string;
-  speed?: number;
-}
+import { createAudioQueue, playWav } from "./audio.ts";
+import {
+  type FullVoiceConfig,
+  loadConfig,
+  type ModelConfig,
+  saveConfig,
+  type VoiceSessionState,
+} from "./config.ts";
+import { extractLastMessage, SPEED_VALUES, speedToIndex, voiceHint } from "./text.ts";
 
 // ── Event Types (exported) ──────────────────────────────────────
 
@@ -102,156 +77,6 @@ export interface VoiceEventMap {
   "voice:config": VoiceConfigEvent;
   "voice:speak_start": VoiceSpeakStartEvent;
   "voice:speak_end": VoiceSpeakEndEvent;
-}
-
-// ── Configuration Schema (TypeBox) ───────────────────────────────
-
-const ModelSchema = Type.Object({
-  provider: Type.String({ minLength: 1 }),
-  id: Type.String({ minLength: 1 }),
-});
-
-const SummarizeEventConfigSchema = Type.Object({
-  prompt: Type.String({ minLength: 1 }),
-  model: Type.Optional(ModelSchema),
-});
-
-const DirectEventConfigSchema = Type.Object({
-  text: Type.String({ minLength: 1 }),
-});
-
-const EventConfigSchema = Type.Union([SummarizeEventConfigSchema, DirectEventConfigSchema]);
-
-const _VoiceConfigSchema = Type.Object({
-  enabled: Type.Optional(Type.Boolean({ default: true })),
-  voice: Type.Optional(Type.String({ default: "af_heart" })),
-  speed: Type.Optional(Type.Number({ minimum: 0.5, maximum: 3.0, default: 1.0 })),
-  host: Type.Optional(Type.String({ default: "127.0.0.1" })),
-  port: Type.Optional(Type.Number({ minimum: 1, maximum: 65535, default: 8181 })),
-  events: Type.Optional(Type.Record(Type.String(), EventConfigSchema)),
-});
-
-// ── Constants ──────────────────────────────────────────────────────
-
-const CONFIG_DIR = resolve(homedir(), ".pi", "voice");
-const CONFIG_PATH = resolve(CONFIG_DIR, "config.json");
-const SPEED_VALUES = [
-  "0.5",
-  "0.75",
-  "1.0",
-  "1.25",
-  "1.5",
-  "1.75",
-  "2.0",
-  "2.25",
-  "2.5",
-  "2.75",
-  "3.0",
-];
-
-const DEFAULT_SUMMARY_PROMPT =
-  "You are preparing text for a text-to-speech system. " +
-  "You will receive a message from a conversation enclosed in quadruple backticks. " +
-  "Summarize it in one single very short sentence, two at most. " +
-  "Use a dry, matter-of-fact tone. " +
-  "Do not use any markdown formatting, just plain text. " +
-  "Prefer words over symbols or abbreviations, as this will be read aloud. " +
-  "Output only the sentence, nothing else.";
-
-function speedToIndex(speed: number): number {
-  const idx = SPEED_VALUES.findIndex((s) => Number.parseFloat(s) === speed);
-  return idx >= 0 ? idx : 0;
-}
-
-function voiceHint(name: string): string {
-  const langMap: Record<string, string> = {
-    a: "American",
-    b: "British",
-    j: "Japanese",
-    z: "Mandarin",
-    e: "Spanish",
-    f: "French",
-    h: "Hindi",
-    i: "Italian",
-    p: "Brazilian",
-  };
-  const genderMap: Record<string, string> = { f: "female", m: "male" };
-  const lang = langMap[name[0]] ?? "";
-  const gender = genderMap[name[1]] ?? "";
-  if (lang && gender) return `${lang} ${gender}`;
-  if (gender) return gender;
-  return lang;
-}
-
-const DEFAULT_CONFIG: FullVoiceConfig = {
-  enabled: true,
-  voice: "af_heart",
-  speed: 1.0,
-  host: "127.0.0.1",
-  port: 8181,
-  events: {
-    agent_end: {
-      prompt: DEFAULT_SUMMARY_PROMPT,
-    },
-  },
-};
-
-// ── Config file persistence (~/.pi/voice/config.json) ──────────────
-
-function loadConfig(): FullVoiceConfig {
-  try {
-    if (existsSync(CONFIG_PATH)) {
-      const raw = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
-      // Do NOT merge with DEFAULT_CONFIG — only what the user has written runs.
-      // If events is missing from user config, no auto-TTS events fire.
-      return {
-        enabled: raw.enabled ?? DEFAULT_CONFIG.enabled,
-        voice: raw.voice ?? DEFAULT_CONFIG.voice,
-        speed: raw.speed ?? DEFAULT_CONFIG.speed,
-        host: raw.host ?? DEFAULT_CONFIG.host,
-        port: raw.port ?? DEFAULT_CONFIG.port,
-        events: raw.events,
-      };
-    }
-  } catch {
-    /* use defaults */
-  }
-  return { ...DEFAULT_CONFIG };
-}
-
-function saveConfig(config: FullVoiceConfig) {
-  mkdirSync(CONFIG_DIR, { recursive: true });
-  writeFileSync(CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`);
-}
-
-// ── Context Extraction ────────────────────────────────────────────
-
-/**
- * Extract last_message text from event data.
- * Handles both single-message events (turn_end, message_end)
- * and multi-message events (agent_end).
- */
-// biome-ignore lint/suspicious/noExplicitAny: event shape varies by event type
-function extractLastMessage(event: any): string {
-  // agent_end has event.messages (array)
-  if (event.messages && Array.isArray(event.messages) && event.messages.length > 0) {
-    const lastMsg = event.messages[event.messages.length - 1];
-    return extractTextContent(lastMsg?.content);
-  }
-  // turn_end, message_end have event.message
-  return extractTextContent(event.message?.content);
-}
-
-// biome-ignore lint/suspicious/noExplicitAny: content items have varying shapes
-function extractTextContent(content: any[] | undefined): string {
-  if (!content) return "";
-  return (
-    content
-      // biome-ignore lint/suspicious/noExplicitAny: type guard filters unknown content items
-      .filter((c: any): c is { type: "text"; text: string } => c.type === "text")
-      .map((c) => c.text)
-      .join("\n")
-  );
 }
 
 // ── Event Processing ───────────────────────────────────────────────
@@ -376,75 +201,13 @@ export default function (pi: ExtensionAPI) {
 
   // ── Audio playback ────────────────────────────────────────────
 
-  // Long summaries can exceed 30s of audio; give playback ample time.
-  const AUDIO_PLAYBACK_TIMEOUT_MS = 5 * 60 * 1000;
   // Temp audio lives in the OS tmpdir, not the config dir — a crashed pi
   // must not accumulate stale voice-*.wav files in ~/.pi/voice.
   const TMP_AUDIO_DIR = join(tmpdir(), "pi-voice");
   let tmpSeq = 0;
 
-  function firstExistingCommand(candidates: string[], fallback: string): string {
-    for (const cmd of candidates) {
-      if (existsSync(cmd)) return cmd;
-    }
-    return fallback;
-  }
-
-  function getAudioPlayer(): string {
-    if (process.platform === "darwin") {
-      return firstExistingCommand(["/usr/bin/afplay"], "afplay");
-    }
-    // Linux: prefer PipeWire/PulseAudio players, fall back to ALSA.
-    return firstExistingCommand(
-      [
-        "/usr/bin/pw-play",
-        "/usr/local/bin/pw-play",
-        "/usr/bin/paplay",
-        "/usr/local/bin/paplay",
-        "/usr/bin/aplay",
-        "/usr/local/bin/aplay",
-      ],
-      "aplay",
-    );
-  }
-
-  // execFile (no shell) — no quoting bugs, no injection surface.
-  function playWav(outPath: string): Promise<void> {
-    return new Promise((resolve, reject) => {
-      execFileCb(getAudioPlayer(), [outPath], { timeout: AUDIO_PLAYBACK_TIMEOUT_MS }, (err) =>
-        err ? reject(err) : resolve(),
-      );
-    });
-  }
-
-  // ── Audio playback queue ────────────────────────────────────────
-
   // Serializes audio playback so tts tool and auto-TTS never overlap.
-  type QueueItem = {
-    play: () => Promise<void>;
-  };
-
-  const audioQueue: QueueItem[] = [];
-  let audioPlaying = false;
-
-  function drainAudioQueue(): void {
-    if (audioPlaying) return;
-    const item = audioQueue.shift();
-    if (!item) return;
-    audioPlaying = true;
-    item
-      .play()
-      .catch(() => {})
-      .finally(() => {
-        audioPlaying = false;
-        drainAudioQueue();
-      });
-  }
-
-  function enqueueAudio(item: QueueItem): void {
-    audioQueue.push(item);
-    drainAudioQueue();
-  }
+  const audioQueue = createAudioQueue();
 
   // ── Speak + Auto-TTS (closured over pi) ─────────────────────
 
@@ -481,14 +244,11 @@ export default function (pi: ExtensionAPI) {
       }
 
       const wavBuffer = Buffer.from(await res.arrayBuffer());
-      const outPath = join(
-        TMP_AUDIO_DIR,
-        `voice-${process.pid}-${Date.now()}-${tmpSeq++}.wav`,
-      );
+      const outPath = join(TMP_AUDIO_DIR, `voice-${process.pid}-${Date.now()}-${tmpSeq++}.wav`);
       mkdirSync(TMP_AUDIO_DIR, { recursive: true });
       writeFileSync(outPath, wavBuffer);
 
-      enqueueAudio({
+      audioQueue.enqueue({
         play: async () => {
           let playbackError: Error | null = null;
           try {
