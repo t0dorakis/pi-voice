@@ -28,9 +28,9 @@
  *     Uses session overrides > global defaults.
  */
 
-import { exec as execCb } from "node:child_process";
+import { execFile as execFileCb } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
@@ -374,6 +374,49 @@ export default function (pi: ExtensionAPI) {
     defaults = loadConfig();
   }
 
+  // ── Audio playback ────────────────────────────────────────────
+
+  // Long summaries can exceed 30s of audio; give playback ample time.
+  const AUDIO_PLAYBACK_TIMEOUT_MS = 5 * 60 * 1000;
+  // Temp audio lives in the OS tmpdir, not the config dir — a crashed pi
+  // must not accumulate stale voice-*.wav files in ~/.pi/voice.
+  const TMP_AUDIO_DIR = join(tmpdir(), "pi-voice");
+  let tmpSeq = 0;
+
+  function firstExistingCommand(candidates: string[], fallback: string): string {
+    for (const cmd of candidates) {
+      if (existsSync(cmd)) return cmd;
+    }
+    return fallback;
+  }
+
+  function getAudioPlayer(): string {
+    if (process.platform === "darwin") {
+      return firstExistingCommand(["/usr/bin/afplay"], "afplay");
+    }
+    // Linux: prefer PipeWire/PulseAudio players, fall back to ALSA.
+    return firstExistingCommand(
+      [
+        "/usr/bin/pw-play",
+        "/usr/local/bin/pw-play",
+        "/usr/bin/paplay",
+        "/usr/local/bin/paplay",
+        "/usr/bin/aplay",
+        "/usr/local/bin/aplay",
+      ],
+      "aplay",
+    );
+  }
+
+  // execFile (no shell) — no quoting bugs, no injection surface.
+  function playWav(outPath: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      execFileCb(getAudioPlayer(), [outPath], { timeout: AUDIO_PLAYBACK_TIMEOUT_MS }, (err) =>
+        err ? reject(err) : resolve(),
+      );
+    });
+  }
+
   // ── Audio playback queue ────────────────────────────────────────
 
   // Serializes audio playback so tts tool and auto-TTS never overlap.
@@ -438,30 +481,34 @@ export default function (pi: ExtensionAPI) {
       }
 
       const wavBuffer = Buffer.from(await res.arrayBuffer());
-      const outPath = join(CONFIG_DIR, `voice-${Date.now()}.wav`);
-      mkdirSync(CONFIG_DIR, { recursive: true });
+      const outPath = join(
+        TMP_AUDIO_DIR,
+        `voice-${process.pid}-${Date.now()}-${tmpSeq++}.wav`,
+      );
+      mkdirSync(TMP_AUDIO_DIR, { recursive: true });
       writeFileSync(outPath, wavBuffer);
 
       enqueueAudio({
-        play: () =>
-          new Promise<void>((resolve) => {
-            const cmd = process.platform === "darwin" ? "afplay" : "aplay";
-            execCb(`${cmd} "${outPath}"`, { timeout: 30_000 }, (err) => {
-              if (err) console.warn("[pi-voice] Playback error:", err);
-              const endEvent: VoiceSpeakEndEvent = {
-                text,
-                source,
-                ...(err ? { error: err.message } : {}),
-              };
-              pi.events.emit("voice:speak_end", endEvent);
-              try {
-                unlinkSync(outPath);
-              } catch {
-                /* ignore */
-              }
-              resolve();
-            });
-          }),
+        play: async () => {
+          let playbackError: Error | null = null;
+          try {
+            await playWav(outPath);
+          } catch (err) {
+            playbackError = err instanceof Error ? err : new Error(String(err));
+            console.warn("[pi-voice] Playback error:", playbackError);
+          }
+          const endEvent: VoiceSpeakEndEvent = {
+            text,
+            source,
+            ...(playbackError ? { error: playbackError.message } : {}),
+          };
+          pi.events.emit("voice:speak_end", endEvent);
+          try {
+            unlinkSync(outPath);
+          } catch {
+            /* ignore */
+          }
+        },
       });
     } catch (error) {
       console.warn("[pi-voice] TTS error:", error);
@@ -598,16 +645,18 @@ export default function (pi: ExtensionAPI) {
               throw new Error(errData.error || "Server error");
             }
             const wavBuffer = Buffer.from(await res.arrayBuffer());
-            const outPath = join(CONFIG_DIR, "voice-sample.wav");
-            mkdirSync(CONFIG_DIR, { recursive: true });
+            const outPath = join(TMP_AUDIO_DIR, `voice-sample-${process.pid}.wav`);
+            mkdirSync(TMP_AUDIO_DIR, { recursive: true });
             writeFileSync(outPath, wavBuffer);
-            const cmd = process.platform === "darwin" ? "afplay" : "aplay";
-            await new Promise<void>((resolve, reject) => {
-              execCb(`${cmd} "${outPath}"`, { timeout: 30_000 }, (err) => {
-                if (err) reject(err);
-                else resolve();
-              });
-            });
+            try {
+              await playWav(outPath);
+            } finally {
+              try {
+                unlinkSync(outPath);
+              } catch {
+                /* ignore */
+              }
+            }
             pi.events.emit("voice:speak_end", { text: sampleText, source: "sample" });
           } catch (error) {
             pi.events.emit("voice:speak_end", {
