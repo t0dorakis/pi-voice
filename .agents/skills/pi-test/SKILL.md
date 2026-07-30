@@ -30,8 +30,8 @@ All tests require the server running with a loaded model **before** spawning pi.
 | Script | What it tests | Run |
 |--------|---------------|-----|
 | `tests/tui.sh` | /voice command: navigate, toggle, cycle, reset, close | `npm run test:tui` |
-| `tests/tts-tool.sh` | tts tool: agent invokes tool, WAV file created | `npm run test:tts-tool` |
-| `tests/auto-tts.sh` | Auto-TTS: agent_end fires exactly 1 POST /tts | `npm run test:auto-tts` |
+| `tests/toggle.sh` | alt+v toggle: session-only override, status bar ♪ | `npm run test:toggle` |
+| `tests/queue.sh` | Playback queue: tool + auto-TTS audio never overlap | `npm run test:queue` |
 | `tests/run.sh` | All three suites | `npm run test:e2e` |
 
 ## Test Architecture
@@ -39,7 +39,7 @@ All tests require the server running with a loaded model **before** spawning pi.
 - `tests/helpers.sh` — shared utilities: assertions, pilotty wrappers, session lifecycle, server checks
 - Each test: sources helpers → spawns pi → interacts → asserts → cleans up
 - Config is backed up and restored around each test to avoid side effects
-- `auto-tts.sh` uses a counting HTTP proxy to verify exact request counts
+- `queue.sh` polls afplay PIDs to detect overlapping playback
 
 ## Core Workflow
 
@@ -147,5 +147,5 @@ Then add to `tests/run.sh`'s default `TESTS` array and add a script entry in `pa
 | Pi won't start | Increase timeout: `wait_for_pi 30000` |
 | TUI doesn't appear | Longer settle: `await_change_and_snapshot_text "$HASH" 1000 10000` |
 | Session not found | `pilotty list-sessions` — sessions cleaned up on exit |
-| WAV file missing | `speak()` deletes after playback — expected for tts-tool tests |
-| Proxy port conflict | `lsof -ti:18181 \| xargs kill -9` (auto-tts test) |
+| WAV file missing | `speak()` deletes after playback — expected |
+| afplay overlap detected | Playback queue regression — audio must serialize (tests/queue.sh) |

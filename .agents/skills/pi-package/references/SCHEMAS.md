@@ -28,7 +28,7 @@ Every tool needs a `parameters` field using `Type.Object()`:
 
 ```typescript
 import { Type } from "typebox";
-import { StringEnum } from "@mariozechner/pi-ai";
+import { StringEnum } from "@earendil-works/pi-ai";
 
 pi.registerTool({
   name: "my_tool",
@@ -66,11 +66,11 @@ Type.Number({ minimum: 0, maximum: 100 })  // with constraints
 
 ## 3. String Enums (Google-compatible)
 
-**Always** use `StringEnum` from `@mariozechner/pi-ai`. `Type.Union`/`Type.Literal`
+**Always** use `StringEnum` from `@earendil-works/pi-ai`. `Type.Union`/`Type.Literal`
 does not work with Google's API.
 
 ```typescript
-import { StringEnum } from "@mariozechner/pi-ai";
+import { StringEnum } from "@earendil-works/pi-ai";
 
 // Basic string enum
 StringEnum(["create", "read", "update", "delete"] as const)

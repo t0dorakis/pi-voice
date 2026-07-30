@@ -2,9 +2,15 @@
 
 Give your Pi agent a voice.
 
-pi-voice is a text-to-speech package for the [Pi coding agent](https://github.com/mariozechner/pi). It runs a local HTTP server powered by [Kokoro ONNX](https://github.com/hexgrad/kokoro) and exposes a `/voice` settings UI, a `tts` tool, and automatic speech on agent responses.
+pi-voice is a text-to-speech package for the [Pi coding agent](https://github.com/earendil-works/pi). It runs a local HTTP server powered by [Kokoro ONNX](https://github.com/hexgrad/kokoro) and exposes a `/voice` settings UI, a `tts` tool, and automatic speech on agent responses.
 
 **How it works:** The server loads a single Kokoro ONNX model into memory and exposes a REST API for synthesis. The pi extension talks to this server over HTTP — it never loads the model directly. This separation keeps the agent lightweight while the server handles the heavy ONNX inference.
+
+## Requirements
+
+- **pi ≥ 0.83** (`@earendil-works/pi-coding-agent`)
+- **Node ≥ 22.18** for the `pi-voice` CLI and server
+- **Audio player**: `afplay` (built into macOS) or `aplay`/`pw-play`/`paplay` on Linux (e.g. `alsa-utils`, `pipewire`, `pulseaudio`). Windows is not currently supported.
 
 ## Installation
 
@@ -12,12 +18,14 @@ pi-voice is a text-to-speech package for the [Pi coding agent](https://github.co
 pi install npm:@s1m0n38/pi-voice
 ```
 
-The `pi-voice` CLI is available after install. Start the server and download the default model:
+Start the server and download the default model:
 
 ```bash
-pi-voice server                      # start on 127.0.0.1:8181
-pi-voice download q4                 # download + activate the q4 model (~291 MB)
+pi-voice server start                # start on 127.0.0.1:8181, load default model
+pi-voice model load q4               # or download + activate a specific dtype (~291 MB)
 ```
+
+> **Note:** `pi install` puts the extension on pi's extension path but does **not** add the `pi-voice` CLI to your shell's `PATH`. To use the CLI, either install the package globally (`npm install -g @s1m0n38/pi-voice`) or run it through npx (`npx @s1m0n38/pi-voice server start`).
 
 ## Usage
 
@@ -33,9 +41,9 @@ Open the interactive settings UI inside Pi:
 | Voice | Speaker voice (with language/gender hints) | ← → |
 | Speed | Speech rate (0.5×–3.0×) | ← → |
 
-Navigate with ↑ ↓, press **Enter** to play a sample, **r** to reset defaults, **Esc** to close.
+Navigate with ↑ ↓, change values with ← →, press **Enter** to play a sample, **s** to save as default, **r** to reset to the saved defaults, **Esc** to close. Toggle speech quickly anywhere with **alt+v**.
 
-Settings persist in `~/.pi/voice/config.json` across sessions.
+Changes apply to the current session only; press **s** to persist them as defaults in `~/.pi/voice/config.json`.
 
 ### `tts` tool
 
@@ -44,6 +52,8 @@ The agent can speak at any time using the `tts` tool:
 ```
 > Use the tts tool to say "Build complete, all tests passing"
 ```
+
+> Markdown is cleaned up server-side before synthesis: fenced code blocks are dropped, and links/emphasis/headings are spoken as plain words.
 
 ### Auto-TTS
 
@@ -82,13 +92,18 @@ Built-in pi events (`agent_end`, `turn_end`, `message_end`) use the message data
 ## CLI Reference
 
 ```bash
-pi-voice server                              # start server (default: 127.0.0.1:8181)
-pi-voice server --host 0.0.0.0 --port 9090   # custom host/port
-pi-voice download q4                         # download + activate model dtype
-pi-voice delete q4                           # delete cached model files
-pi-voice status                              # show server status and active model
-pi-voice voices                              # list available voices
+pi-voice server status               # show server status and active model
+pi-voice server start                # start server (default: 127.0.0.1:8181), load default model
+pi-voice server stop                 # stop the server process
+pi-voice server restart              # restart the server
+pi-voice model list                  # list dtypes with download/active status
+pi-voice model load <dtype>          # load a model (downloads first if needed)
+pi-voice model unload                # unload the active model, free memory
+pi-voice model download <dtype>      # download without loading
+pi-voice model remove <dtype>        # unload (if active) + delete cached files
 ```
+
+Global options: `--host <host>`, `--port <port>`.
 
 ### Model dtypes
 
@@ -102,7 +117,7 @@ pi-voice voices                              # list available voices
 
 Only one model is loaded at a time. Downloading or activating a new model automatically unloads the previous one.
 
-Model files are cached at `~/.pi/voice/cache/` and persist across `npm install` cycles. To reclaim disk space, use `pi-voice delete <dtype>`.
+Model files are cached at `~/.pi/voice/cache/` and persist across `npm install` cycles. To reclaim disk space, use `pi-voice model remove <dtype>`.
 
 ## API
 

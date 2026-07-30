@@ -56,7 +56,7 @@ print_summary
 
 ## 2. Agent Tool Invocation Test
 
-Tests that the agent can invoke the `tts` tool. Pattern used in `tests/tts-tool.sh`.
+Tests that the agent can invoke the `tts` tool. Pattern used in the retired tests/tts-tool.sh (suite removed; kept here as a reference).
 
 ```bash
 #!/bin/bash
@@ -100,7 +100,7 @@ print_summary
 
 ## 3. Event Handler Request Counting Test
 
-Tests that auto-TTS fires exactly once per event. Uses a counting HTTP proxy. Pattern from `tests/auto-tts.sh`.
+Tests that auto-TTS fires exactly once per event. Uses a counting HTTP proxy. Pattern from the retired tests/auto-tts.sh (suite removed; kept here as a reference).
 
 ```bash
 #!/bin/bash
@@ -260,8 +260,8 @@ print_summary
 ```bash
 # Individual suites
 npm run test:tui           # /voice TUI interaction tests
-npm run test:tts-tool      # tts tool invocation tests
-npm run test:auto-tts      # auto-TTS event handler tests
+npm run test:toggle        # alt+v toggle tests
+npm run test:queue         # playback queue overlap tests
 
 # All E2E tests
 npm run test:e2e

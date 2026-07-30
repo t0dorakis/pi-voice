@@ -30,7 +30,7 @@ A catalog of essential patterns for writing pi extensions.
 
 ```typescript
 // extensions/index.ts
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 export default function (pi: ExtensionAPI) {
@@ -71,7 +71,7 @@ extensions/
 - **`type` imports** — use `import type` for `ExtensionAPI` and other types
 - **`export default function`** — the factory must be the default export
 - **`typebox` for schemas** — tool parameters must use `Type.Object()`, not raw TypeScript types
-- **Peer dependencies** — `@mariozechner/pi-ai`, `@mariozechner/pi-coding-agent`, `@mariozechner/pi-tui`, `@mariozechner/pi-agent-core`, `typebox` are provided by pi at runtime. List them as `peerDependencies` with `"*"` range
+- **Peer dependencies** — `@earendil-works/pi-ai`, `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`, `@earendil-works/pi-agent-core`, `typebox` are provided by pi at runtime. List them as `peerDependencies` with `"*"` range
 
 ---
 
@@ -101,7 +101,7 @@ pi.registerTool({
 ### Tool with prompt snippet and guidelines
 
 ```typescript
-import { StringEnum } from "@mariozechner/pi-ai";
+import { StringEnum } from "@earendil-works/pi-ai";
 
 pi.registerTool({
   name: "todo",
@@ -185,7 +185,7 @@ import {
   formatSize,
   DEFAULT_MAX_BYTES,
   DEFAULT_MAX_LINES,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 
 async execute(toolCallId, params, signal, onUpdate, ctx) {
   const output = await runLargeCommand();
@@ -211,7 +211,7 @@ async execute(toolCallId, params, signal, onUpdate, ctx) {
 ### Tool with file mutation queue (prevents race conditions)
 
 ```typescript
-import { withFileMutationQueue } from "@mariozechner/pi-coding-agent";
+import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
@@ -325,7 +325,7 @@ pi.registerCommand("hello", {
 ### Command with autocomplete
 
 ```typescript
-import type { AutocompleteItem } from "@mariozechner/pi-tui";
+import type { AutocompleteItem } from "@earendil-works/pi-tui";
 
 pi.registerCommand("deploy", {
   description: "Deploy to an environment",
@@ -398,7 +398,7 @@ pi.on("session_shutdown", async (event, ctx) => {
 ### Tool interception (gate)
 
 ```typescript
-import { isToolCallEventType } from "@mariozechner/pi-coding-agent";
+import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
 
 pi.on("tool_call", async (event, ctx) => {
   if (isToolCallEventType("bash", event)) {
@@ -539,7 +539,7 @@ ctx.ui.setTitle("pi - my-project");
 ### Simple custom component
 
 ```typescript
-import { Text } from "@mariozechner/pi-tui";
+import { Text } from "@earendil-works/pi-tui";
 
 const result = await ctx.ui.custom<boolean>((tui, theme, keybindings, done) => {
   const text = new Text("Press Enter to confirm, Escape to cancel", 0, 0);
@@ -566,8 +566,8 @@ const result = await ctx.ui.custom<string | null>(
 ### Custom editor
 
 ```typescript
-import { CustomEditor } from "@mariozechner/pi-coding-agent";
-import { matchesKey } from "@mariozechner/pi-tui";
+import { CustomEditor } from "@earendil-works/pi-coding-agent";
+import { matchesKey } from "@earendil-works/pi-tui";
 
 class VimEditor extends CustomEditor {
   private mode: "normal" | "insert" = "insert";
@@ -650,7 +650,7 @@ pi.on("session_start", async (_event, ctx) => {
 ### Tool renderers
 
 ```typescript
-import { Text } from "@mariozechner/pi-tui";
+import { Text } from "@earendil-works/pi-tui";
 
 pi.registerTool({
   name: "my_tool",
@@ -705,7 +705,7 @@ Use `keyHint()` to display keybinding hints that respect the active
 keybinding configuration:
 
 ```typescript
-import { keyHint } from "@mariozechner/pi-coding-agent";
+import { keyHint } from "@earendil-works/pi-coding-agent";
 
 renderResult(result, { expanded }, theme, context) {
   let text = theme.fg("success", "✓ Done");
@@ -747,7 +747,7 @@ pi.registerMessageRenderer("my-extension", (message, options, theme) => {
 ### SSH remote tools
 
 ```typescript
-import { createBashTool, createReadTool } from "@mariozechner/pi-coding-agent";
+import { createBashTool, createReadTool } from "@earendil-works/pi-coding-agent";
 
 const remoteBash = createBashTool(cwd, {
   operations: {
@@ -810,9 +810,9 @@ pi.registerProvider("anthropic", {
 
 ```typescript
 // ❌ Bundled at runtime, breaks peer dep
-import { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 // ✅ Type-only import
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 ```
 
 ### ❌ Use raw TypeScript types for tool parameters
@@ -829,8 +829,8 @@ parameters: Type.Object({ name: Type.String() })
 ```typescript
 // ❌ Breaks Google API compatibility
 Type.Union([Type.Literal("a"), Type.Literal("b")])
-// ✅ Use StringEnum from @mariozechner/pi-ai
-import { StringEnum } from "@mariozechner/pi-ai";
+// ✅ Use StringEnum from @earendil-works/pi-ai
+import { StringEnum } from "@earendil-works/pi-ai";
 StringEnum(["a", "b"] as const)
 ```
 
@@ -847,9 +847,9 @@ StringEnum(["a", "b"] as const)
 
 ```typescript
 // ❌ Peer deps must use "*" range
-{ "peerDependencies": { "@mariozechner/pi-coding-agent": "^0.70.0" } }
+{ "peerDependencies": { "@earendil-works/pi-coding-agent": "^0.70.0" } }
 // ✅ Unpinned — pi provides the version
-{ "peerDependencies": { "@mariozechner/pi-coding-agent": "*" } }
+{ "peerDependencies": { "@earendil-works/pi-coding-agent": "*" } }
 ```
 
 ### ❌ Add a build/compile step

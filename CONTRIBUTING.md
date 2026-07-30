@@ -13,7 +13,8 @@ Verify everything works:
 ```bash
 npm run typecheck   # TypeScript (tsc --noEmit)
 npm run lint        # Biome check
-npm test            # Server integration tests (~50s, downloads q4 model on first run)
+npm run test:unit   # Fast unit tests (no model/hardware)
+npm test            # Unit + server integration tests (~60s, downloads q4 model on first run)
 ```
 
 ### E2E tests (optional)
@@ -21,7 +22,7 @@ npm test            # Server integration tests (~50s, downloads q4 model on firs
 E2E tests exercise the full extension stack via PTY automation. They require:
 
 - A running TTS server with a loaded model
-- [pilotty](https://github.com/mariozechner/pilotty) installed globally
+- [pilotty](https://github.com/msmps/pilotty) installed globally
 - A working pi installation with a model
 
 ```bash
@@ -29,7 +30,7 @@ npm run server       # terminal 1: start server
 npm run test:e2e     # terminal 2: run all E2E suites
 ```
 
-Individual suites: `npm run test:tui`, `npm run test:tts-tool`, `npm run test:auto-tts`.
+Individual suites: `npm run test:tui`, `npm run test:toggle`, `npm run test:queue`.
 
 ---
 
@@ -41,7 +42,9 @@ Individual suites: `npm run test:tui`, `npm run test:tts-tool`, `npm run test:au
 | `npm run lint` | Check lint + formatting (biome) |
 | `npm run lint:fix` | Auto-fix lint + formatting |
 | `npm run format` | Format code only (biome) |
-| `npm test` | Server integration tests |
+| `npm test` | Unit + server integration tests |
+| `npm run test:unit` | Fast unit tests only (text/config/audio) |
+| `npm run test:events` | Mocked-pi event tests (plays real audio) |
 | `npm run test:e2e` | Full E2E test suite |
 | `npm run server` | Start the TTS server locally |
 | `npm run cli` | Run the pi-voice CLI directly |
@@ -59,17 +62,26 @@ npm run typecheck && npm run lint
 ```
 extensions/
   index.ts             # pi extension: /voice command, tts tool, auto-TTS events
+  text.ts              # Pure text helpers (extraction, hints, markdown cleanup)
+  config.ts            # Config types + load/save
+  audio.ts             # Player detection, WAV playback, serial queue
   server.ts            # HTTP server: Kokoro ONNX model lifecycle + REST API
-  server.test.ts       # Server integration tests (node:test, 28 tests)
+  server.test.ts       # Server integration tests (node:test)
+  events.test.ts       # Mocked-pi event tests
+  text.test.ts         # Unit tests
+  config.test.ts       # Unit tests
+  audio.test.ts        # Unit tests
+bin/
+  pi-voice.mjs         # CLI launcher (createJiti -> src/cli.ts)
 src/
   cli.ts               # CLI: pi-voice server/model management
   prepare.js           # npm prepare script (writes default config)
 tests/
   helpers.sh           # Shared test utilities (assertions, pilotty wrappers)
   run.sh               # E2E test runner
-  tui.sh               # /voice TUI tests (18 tests)
-  tts-tool.sh          # tts tool invocation tests
-  auto-tts.sh          # auto-TTS event handler tests
+  tui.sh               # /voice TUI tests
+  toggle.sh            # alt+v toggle tests
+  queue.sh             # Playback queue overlap tests
 .agents/skills/
   pi-init/             # Environment health check
   pi-package/          # Extension development patterns
@@ -138,8 +150,8 @@ Every push and PR runs type checking + linting via `.github/workflows/ci.yml`. M
 - **No build step** — pi loads `.ts` via jiti. Never add a compile/bundle step.
 - **2-space indentation** — enforced by biome (`biome.json`).
 - **Runtime deps in `dependencies`** — `kokoro-js` and `jiti` are runtime. `biome`, `typescript`, `typebox` are dev.
-- **Peer deps use `*` range** — pi SDK packages (`@mariozechner/pi-*`, `typebox`) are `peerDependencies: "*"` when the extension is active.
-- **Single model in memory** — the server enforces one active model. Every model-swap path calls `unloadModel()` first to dispose ONNX sessions and hint GC.
+- **Peer deps use `*` range** — pi SDK packages (`@earendil-works/pi-*`, `typebox`) are `peerDependencies: "*"` when the extension is active.
+- **Single model in memory** — the server enforces one active model. Every model-swap path calls `unloadModel()` first to dispose ONNX sessions and hint GC, and all model ops are serialized via `withModelLock()`.
 
 ---
 
@@ -163,6 +175,7 @@ Before submitting a PR:
 
 - [ ] `npm run typecheck` passes
 - [ ] `npm run lint` passes (or `npm run lint:fix` applied)
+- [ ] `npm run test:unit` passes; new pure logic has unit tests
 - [ ] Conventional commit messages used
 - [ ] No secrets, tokens, or `.env` files committed
 - [ ] Server tests pass (`npm test`) if server code changed

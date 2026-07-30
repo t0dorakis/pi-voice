@@ -27,7 +27,7 @@ The extension never touches the TTS model directly — it sends HTTP requests to
 For the complete API reference, read pi's installed docs:
 
 ```bash
-npm root -g  # → <dir>/@mariozechner/pi-coding-agent/docs/
+npm root -g  # → <dir>/@earendil-works/pi-coding-agent/docs/
 ```
 
 | Doc | When to read |
@@ -117,7 +117,7 @@ Prompt template authoring.
 ## Constraints
 
 - **No build step** — pi loads `.ts` via jiti
-- **Peer deps use `*` range** — `@mariozechner/pi-*`, `typebox`
+- **Peer deps use `*` range** — `@earendil-works/pi-*`, `typebox`
 - **Runtime deps in `dependencies`** — not `devDependencies`
 - **2-space indent** — enforced by biome
 - **Single model in server memory** — extension never loads models directly
