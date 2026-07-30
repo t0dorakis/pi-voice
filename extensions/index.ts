@@ -32,14 +32,14 @@ import { exec as execCb } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
-  AuthStorage,
   createAgentSession,
   DefaultResourceLoader,
+  ModelRuntime,
   SessionManager,
-} from "@mariozechner/pi-coding-agent";
-import { matchesKey } from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-coding-agent";
+import { matchesKey } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 // ── Types ──────────────────────────────────────────────────────────
@@ -256,6 +256,14 @@ function extractTextContent(content: any[] | undefined): string {
 
 // ── Event Processing ───────────────────────────────────────────────
 
+// Shared model runtime for speech-text generation. Created lazily on first
+// use and reused across calls (reads ~/.pi/agent/auth.json + models.json).
+let runtimePromise: Promise<ModelRuntime> | undefined;
+function getModelRuntime(): Promise<ModelRuntime> {
+  runtimePromise ??= ModelRuntime.create();
+  return runtimePromise;
+}
+
 async function generateSpeechText(
   prompt: string,
   context: string,
@@ -282,8 +290,16 @@ async function generateSpeechText(
 
     const loader = new DefaultResourceLoader({
       cwd: process.cwd(),
-      agentDir: resolve(homedir(), ".pi"),
+      agentDir: resolve(homedir(), ".pi", "agent"),
       systemPromptOverride: () => prompt,
+      // Side session only needs the model — skip user resources entirely.
+      // In particular, never load extensions here (pi-voice itself would
+      // register its own auto-TTS handlers in the side session).
+      noExtensions: true,
+      noSkills: true,
+      noPromptTemplates: true,
+      noThemes: true,
+      noContextFiles: true,
     });
     await loader.reload();
 
@@ -291,8 +307,7 @@ async function generateSpeechText(
       model,
       tools: [],
       sessionManager: SessionManager.inMemory(),
-      authStorage: AuthStorage.create(),
-      modelRegistry: ctx.modelRegistry,
+      modelRuntime: await getModelRuntime(),
       resourceLoader: loader,
     });
 
