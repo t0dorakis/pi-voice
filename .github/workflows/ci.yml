@@ -24,6 +24,8 @@ jobs:
       - name: Lint
         run: npm run lint
 
+  # Server integration tests (npm test) download the Kokoro ONNX model and are
+  # too slow for CI — keep CI to fast unit tests with no model download.
   test:
     runs-on: ubuntu-latest
     steps:
