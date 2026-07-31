@@ -35,13 +35,5 @@ jobs:
 
       - run: npm ci
 
-      - name: Cache HuggingFace models
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/huggingface
-          key: huggingface-models-${{ runner.os }}-q4
-          restore-keys: |
-            huggingface-models-${{ runner.os }}-
-
-      - name: Server integration tests
-        run: npm test
+      - name: Unit tests (no model download)
+        run: npm run test:unit

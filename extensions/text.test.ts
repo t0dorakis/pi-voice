@@ -59,11 +59,17 @@ describe("cleanTextForSpeech", () => {
 
   it("speaks link labels and image alt text, not URLs", () => {
     assert.equal(cleanTextForSpeech("see [the docs](https://example.com)"), "see the docs");
-    assert.equal(cleanTextForSpeech("![architecture diagram](https://x/img.png)"), "architecture diagram");
+    assert.equal(
+      cleanTextForSpeech("![architecture diagram](https://x/img.png)"),
+      "architecture diagram",
+    );
   });
 
   it("unwraps emphasis without eating snake_case or math", () => {
-    assert.equal(cleanTextForSpeech("**bold** and *italic* and __strong__ and _em_"), "bold and italic and strong and em");
+    assert.equal(
+      cleanTextForSpeech("**bold** and *italic* and __strong__ and _em_"),
+      "bold and italic and strong and em",
+    );
     assert.equal(cleanTextForSpeech("voice_idx and a_b_c stay"), "voice_idx and a_b_c stay");
     assert.equal(cleanTextForSpeech("~~deleted~~ kept"), "deleted kept");
   });
