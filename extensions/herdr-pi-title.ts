@@ -43,6 +43,7 @@ export default function herdrPiBridge(pi: ExtensionAPI): void {
   let active = false;
   let sessionPath: string | undefined;
   let blockedCount = 0;
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
   let sequence = initialSequence();
   let reports = Promise.resolve();
   const herdr = process.env.HERDR_BIN_PATH || "herdr";
@@ -74,6 +75,11 @@ export default function herdrPiBridge(pi: ExtensionAPI): void {
           `[pi-voice] Herdr report failed: ${error instanceof Error ? error.message : String(error)}`,
         );
       });
+  }
+
+  function clearIdleTimer(): void {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = undefined;
   }
 
   function reportState(state: "working" | "blocked" | "idle", message?: string): void {
@@ -160,16 +166,29 @@ export default function herdrPiBridge(pi: ExtensionAPI): void {
 
   pi.on("agent_start", (_event, ctx) => {
     if (!active) return;
+    clearIdleTimer();
     sessionPath = ctx.sessionManager.getSessionFile() ?? sessionPath;
     reportState(blockedCount > 0 ? "blocked" : "working");
   });
 
+  pi.on("agent_end", (_event, ctx) => {
+    if (!active) return;
+    clearIdleTimer();
+    idleTimer = setTimeout(() => {
+      idleTimer = undefined;
+      if (active && ctx.isIdle()) reportState(blockedCount > 0 ? "blocked" : "idle");
+    }, 500);
+    idleTimer.unref?.();
+  });
+
   pi.on("agent_settled", () => {
     if (!active) return;
+    clearIdleTimer();
     reportState(blockedCount > 0 ? "blocked" : "idle");
   });
 
   pi.on("session_shutdown", async (event) => {
+    clearIdleTimer();
     watcher?.close();
     watcher = undefined;
     if (active && event.reason === "quit" && paneId) {
