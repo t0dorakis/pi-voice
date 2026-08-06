@@ -52,6 +52,8 @@ interface VoiceConfig {
 interface OwnerRecord {
   pid: number;
   token: string;
+  paneId: string;
+  status: string;
 }
 
 export interface EventOperations {
@@ -134,14 +136,41 @@ async function acquireLock(directory: string): Promise<() => void> {
   throw new Error("Timed out acquiring Herdr spoken-status owner lock.");
 }
 
-async function claimNewest(directory: string): Promise<OwnerRecord> {
+async function claimNewest(
+  directory: string,
+  paneId: string,
+  status: string,
+): Promise<OwnerRecord | null> {
   const release = await acquireLock(directory);
   try {
     const previous = readJsonFile<OwnerRecord>(ownerPath(directory));
+    if (
+      previous?.paneId === paneId &&
+      previous.status === status &&
+      verifiedEventProcess(previous.pid)
+    ) {
+      return null;
+    }
     if (previous && verifiedEventProcess(previous.pid)) process.kill(previous.pid, "SIGTERM");
-    const owner = { pid: process.pid, token: randomUUID() };
+    const owner = { pid: process.pid, token: randomUUID(), paneId, status };
     atomicWriteJson(ownerPath(directory), owner);
     return owner;
+  } finally {
+    release();
+  }
+}
+
+async function cancelPaneWork(directory: string, paneId: string): Promise<void> {
+  const release = await acquireLock(directory);
+  try {
+    const current = readJsonFile<OwnerRecord>(ownerPath(directory));
+    if (!current || (current.paneId && current.paneId !== paneId)) return;
+    if (verifiedEventProcess(current.pid)) process.kill(current.pid, "SIGTERM");
+    try {
+      unlinkSync(ownerPath(directory));
+    } catch {
+      // already removed
+    }
   } finally {
     release();
   }
@@ -381,21 +410,30 @@ export async function runHerdrEvent(
   injected?: EventOperations,
 ): Promise<void> {
   const event = parseStatusEvent(env.HERDR_PLUGIN_EVENT_JSON);
-  if (!event) return;
+  if (!event) {
+    console.warn("[pi-voice] Herdr event skipped: invalid event payload.");
+    return;
+  }
   const directory = stateDir(env);
-  if (!event.cancellation && (!event.status || !ELIGIBLE_STATUSES.has(event.status))) return;
-  const owner = await claimNewest(directory);
+  if (!event.cancellation && (!event.status || !ELIGIBLE_STATUSES.has(event.status))) {
+    console.warn(`[pi-voice] Herdr event skipped: ineligible status ${event.status ?? "missing"}.`);
+    return;
+  }
   if (event.cancellation) {
-    await cleanOwner(directory, owner);
+    await cancelPaneWork(directory, event.paneId);
     return;
   }
   if (loadConfig().herdr?.enabled !== true) {
-    await cleanOwner(directory, owner);
+    console.warn("[pi-voice] Herdr event skipped: spoken status is disabled.");
     return;
   }
-
   const eventStatus = event.status;
   if (!eventStatus) return;
+  const owner = await claimNewest(directory, event.paneId, eventStatus);
+  if (!owner) {
+    console.warn("[pi-voice] Herdr event skipped: duplicate completion already running.");
+    return;
+  }
   const abort = new AbortController();
   const active: { child?: ChildProcess } = {};
   const onTerminate = () => {
@@ -406,8 +444,17 @@ export async function runHerdrEvent(
   const operations = injected ?? createOperations(env, active);
   try {
     const pane = await currentPane(event.paneId, env, operations, abort.signal);
-    if (!stillNewest(directory, owner) || !paneMatchesStatus(pane, event.paneId, eventStatus))
+    if (!stillNewest(directory, owner)) {
+      console.warn("[pi-voice] Herdr event skipped: superseded before pane read.");
       return;
+    }
+    const actualStatus = pane?.agent_status ?? "missing";
+    if (!paneMatchesStatus(pane, event.paneId, eventStatus)) {
+      console.warn(
+        `[pi-voice] Herdr event skipped: pane status is ${actualStatus}, expected ${eventStatus}.`,
+      );
+      return;
+    }
     const excerptRaw = await operations.run(
       env.HERDR_BIN_PATH || "herdr",
       [
@@ -423,9 +470,15 @@ export async function runHerdrEvent(
       ],
       abort.signal,
     );
-    if (!stillNewest(directory, owner)) return;
+    if (!stillNewest(directory, owner)) {
+      console.warn("[pi-voice] Herdr event skipped: superseded while reading pane output.");
+      return;
+    }
     const excerpt = boundedRecentText(excerptRaw);
-    if (!excerpt) return;
+    if (!excerpt) {
+      console.warn("[pi-voice] Herdr event skipped: pane output is empty.");
+      return;
+    }
     const statePath = paneStatePath(directory, pane.pane_id);
     const prior = readJsonFile<PaneTitleState>(statePath) ?? {};
     const initialTitle = pane.label ?? pane.title;
@@ -555,7 +608,8 @@ async function status(env: NodeJS.ProcessEnv): Promise<void> {
 async function testSpeech(text: string, env: NodeJS.ProcessEnv): Promise<void> {
   if (!text.trim()) throw new Error("Usage: pi-voice herdr test <controlled text>");
   const directory = stateDir(env);
-  const owner = await claimNewest(directory);
+  const owner = await claimNewest(directory, "manual-test", "test");
+  if (!owner) throw new Error("A manual Herdr speech test is already running.");
   const abort = new AbortController();
   const active: { child?: ChildProcess } = {};
   const terminate = () => {

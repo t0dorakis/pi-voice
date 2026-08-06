@@ -67,11 +67,21 @@ export function parseStatusEvent(raw: string | undefined): HerdrStatusEvent | nu
         : envelope;
     const paneId = data.pane_id;
     if (typeof paneId !== "string" || !paneId) return null;
-    if (envelope.event === "pane.focused" || envelope.event === "pane.closed") {
+    if (
+      envelope.event === "pane.focused" ||
+      envelope.event === "pane_focused" ||
+      envelope.event === "pane.closed" ||
+      envelope.event === "pane_closed"
+    ) {
       return { paneId, cancellation: true };
     }
     const status = data.agent_status;
-    if (envelope.event !== "pane.agent_status_changed" || typeof status !== "string") return null;
+    if (
+      (envelope.event !== "pane.agent_status_changed" &&
+        envelope.event !== "pane_agent_status_changed") ||
+      typeof status !== "string"
+    )
+      return null;
     return { paneId, status, cancellation: status === "working" };
   } catch {
     return null;
