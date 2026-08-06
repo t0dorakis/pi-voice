@@ -19,6 +19,19 @@ describe("Herdr spoken status pure logic", () => {
       ),
       { paneId: "w1:p2", status: "blocked", cancellation: false },
     );
+    assert.deepEqual(
+      parseStatusEvent(
+        JSON.stringify({
+          event: "pane_agent_status_changed",
+          data: {
+            type: "pane_agent_status_changed",
+            pane_id: "w1:p2",
+            agent_status: "idle",
+          },
+        }),
+      ),
+      { paneId: "w1:p2", status: "idle", cancellation: false },
+    );
     assert.equal(parseStatusEvent("not json"), null);
     assert.equal(parseStatusEvent(JSON.stringify({ data: { pane_id: "x" } })), null);
     assert.deepEqual(
