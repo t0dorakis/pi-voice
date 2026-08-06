@@ -1,0 +1,18 @@
+id = "pi-voice.spoken-status"
+name = "Pi Voice Spoken Status"
+version = "0.1.0"
+min_herdr_version = "0.7.3"
+description = "German spoken summaries for unfocused AI agent panes"
+platforms = ["macos"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["./bin/pi-voice.mjs", "herdr", "event"]
+
+[[events]]
+on = "pane.focused"
+command = ["./bin/pi-voice.mjs", "herdr", "event"]
+
+[[events]]
+on = "pane.closed"
+command = ["./bin/pi-voice.mjs", "herdr", "event"]
