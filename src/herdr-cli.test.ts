@@ -175,7 +175,7 @@ describe("Herdr event orchestration", () => {
     assert.equal(spoke, false);
   });
 
-  it("names focused single-pane workspaces without speaking", async () => {
+  it("names and speaks focused single-pane workspaces", async () => {
     const tempHome = home();
     let summarized = false;
     let played = false;
@@ -215,11 +215,9 @@ describe("Herdr event orchestration", () => {
           rename: true,
         });
       },
-      async startChatterbox() {
-        throw new Error("focused panes must not synthesize");
-      },
+      async startChatterbox() {},
       async synthesize() {
-        throw new Error("focused panes must not synthesize");
+        return Buffer.from("fake wav");
       },
       async play() {
         played = true;
@@ -235,7 +233,7 @@ describe("Herdr event orchestration", () => {
     assert.equal(summarized, true);
     assert.equal(renamed, true);
     assert.equal(workspaceRenamed, true);
-    assert.equal(played, false);
+    assert.equal(played, true);
   });
 
   it("rejects a stale completion event when the pane is already working", async () => {

@@ -139,7 +139,7 @@ Stop the backend manually with `pi-voice chatterbox stop`.
 
 ## Herdr spoken status (macOS)
 
-Herdr 0.7.3+ can announce completed, idle, or blocked work from unfocused agent panes. The plugin reads only the newest bounded pane excerpt, verifies Pi's `openai-codex` OAuth subscription, and asks the pinned `gpt-5.6-luna` model for a short German JSON summary and stable task title. It names focused panes silently and speaks background panes through Chatterbox. Working, focus, and close events cancel older synthesis or playback; unknown statuses and non-agent panes are ignored.
+Herdr 0.7.3+ can announce completed, idle, or blocked work from unfocused agent panes. The plugin reads only the newest bounded pane excerpt, verifies Pi's `openai-codex` OAuth subscription, and asks the pinned `gpt-5.6-luna` model for a short German JSON summary and stable task title. It names panes and speaks their concise status through Chatterbox, including the currently focused pane. Working, focus, and close events cancel older synthesis or playback; unknown statuses and non-agent panes are ignored.
 
 Configure Chatterbox first, then link and inspect the local Herdr plugin:
 

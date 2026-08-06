@@ -345,13 +345,7 @@ async function speakAnnouncement(
   const wav = await operations.synthesize(announcement, signal);
   if (!stillNewest(directory, owner)) return;
   const latest = await currentPane(paneId, env, operations, signal);
-  if (
-    !stillNewest(directory, owner) ||
-    !paneMatchesStatus(latest, paneId, eventStatus) ||
-    latest.focused
-  ) {
-    return;
-  }
+  if (!stillNewest(directory, owner) || !paneMatchesStatus(latest, paneId, eventStatus)) return;
   const temporary = mkdtempSync(resolve(tmpdir(), "pi-voice-herdr-"));
   const wavPath = resolve(temporary, "announcement.wav");
   try {
@@ -500,7 +494,6 @@ export async function runHerdrEvent(
       }
     }
 
-    if (latest.focused) return;
     await speakAnnouncement(
       announcement.announcement,
       event.paneId,
