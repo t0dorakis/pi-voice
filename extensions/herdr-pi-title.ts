@@ -174,10 +174,20 @@ export default function herdrPiBridge(pi: ExtensionAPI): void {
   pi.on("agent_end", (_event, ctx) => {
     if (!active) return;
     clearIdleTimer();
-    idleTimer = setTimeout(() => {
+    let attempts = 0;
+    const checkIdle = () => {
       idleTimer = undefined;
-      if (active && ctx.isIdle()) reportState(blockedCount > 0 ? "blocked" : "idle");
-    }, 500);
+      if (!active) return;
+      if (ctx.isIdle()) {
+        reportState(blockedCount > 0 ? "blocked" : "idle");
+        return;
+      }
+      attempts += 1;
+      if (attempts >= 120) return;
+      idleTimer = setTimeout(checkIdle, 500);
+      idleTimer.unref?.();
+    };
+    idleTimer = setTimeout(checkIdle, 500);
     idleTimer.unref?.();
   });
 
