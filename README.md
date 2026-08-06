@@ -137,6 +137,23 @@ Example configuration:
 
 Stop the backend manually with `pi-voice chatterbox stop`.
 
+## Herdr spoken status (macOS)
+
+Herdr 0.7.3+ can announce completed, idle, or blocked work from unfocused agent panes. The plugin reads only the newest bounded pane excerpt, verifies Pi's `openai-codex` OAuth subscription, and asks the pinned `gpt-5.6-luna` model for a short German JSON summary and stable task title. It names focused panes silently and speaks background panes through Chatterbox. Working, focus, and close events cancel older synthesis or playback; unknown statuses and non-agent panes are ignored.
+
+Configure Chatterbox first, then link and inspect the local Herdr plugin:
+
+```bash
+pi-voice chatterbox setup /path/to/reference.wav
+pi-voice herdr setup
+pi-voice herdr status
+pi-voice herdr test "Controlled text to summarize and speak"
+```
+
+`herdr setup` enables the bridge in `~/.pi/voice/config.json`, pins the summarizer, and runs `herdr plugin link` for this package. It deliberately does **not** change Herdr sounds or existing pi-voice exact automatic speech. The plugin never uses an API key fallback or Kokoro. Temporary audio is user-only and deleted after playback.
+
+Pane titles are concise task or feature labels, not completion messages. They change only when initially empty or when the model detects a material task change; a manually supplied or changed title is permanently respected for that pane state. For Pi panes, the separately auto-loaded bridge applies the same title to the matching path-backed Pi session only when its session name is empty or still equals the previous automatic title. It also reports Pi as working until `agent_settled`, so long tool and subagent runs do not appear idle. The bridge is inactive outside Herdr panes (`HERDR_ENV=1`).
+
 ## CLI Reference
 
 ```bash
@@ -155,6 +172,10 @@ pi-voice chatterbox start            # install runtime if needed + start
 pi-voice chatterbox status           # show backend status
 pi-voice chatterbox restart          # restart after config/model changes
 pi-voice chatterbox stop             # release MLX memory
+
+pi-voice herdr setup                  # enable config + link the Herdr plugin
+pi-voice herdr status                 # report plugin and bridge config
+pi-voice herdr test <text>            # controlled summary + speech, no rename
 ```
 
 Global options: `--host <host>`, `--port <port>`.

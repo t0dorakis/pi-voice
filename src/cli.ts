@@ -31,6 +31,7 @@ import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { handleChatterboxCommand } from "./chatterbox-cli.ts";
+import { handleHerdrCommand } from "./herdr-cli.ts";
 
 // ── Paths ──────────────────────────────────────────────────────────
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -469,6 +470,9 @@ Usage:
   pi-voice chatterbox start           Start the Chatterbox MLX service
   pi-voice chatterbox stop            Stop the Chatterbox MLX service
   pi-voice chatterbox status          Show Chatterbox service status
+  pi-voice herdr setup                Configure and link the Herdr plugin
+  pi-voice herdr status               Show Herdr plugin/config status
+  pi-voice herdr test <text>          Summarize and speak controlled text
 
 Options:
   --host <host>   Override server host (default: 127.0.0.1)
@@ -530,8 +534,12 @@ async function main() {
     return await handleChatterboxCommand(command, rest);
   }
 
+  if (domain === "herdr") {
+    return await handleHerdrCommand(command, rest);
+  }
+
   console.error(`Unknown domain: ${domain}`);
-  console.error("Available: server, model");
+  console.error("Available: server, model, chatterbox, herdr");
   process.exit(1);
 }
 

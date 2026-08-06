@@ -31,11 +31,15 @@
     "README.md",
     "CHANGELOG.md",
     "LICENSE",
+    "herdr-plugin.toml",
+    "!**/*.test.ts",
+    "!tests",
     "!.github"
   ],
   "pi": {
     "extensions": [
-      "./extensions/index.ts"
+      "./extensions/index.ts",
+      "./extensions/herdr-pi-title.ts"
     ]
   },
   "publishConfig": {
@@ -43,7 +47,7 @@
   },
   "scripts": {
     "test": "npm run test:unit && node --import jiti/register extensions/server.test.ts",
-    "test:unit": "node --import jiti/register --test extensions/text.test.ts extensions/config.test.ts extensions/audio.test.ts src/chatterbox-cli.test.ts",
+    "test:unit": "node --import jiti/register --test extensions/text.test.ts extensions/config.test.ts extensions/audio.test.ts src/chatterbox-cli.test.ts src/herdr-status.test.ts src/herdr-cli.test.ts",
     "test:events": "node --import jiti/register extensions/events.test.ts",
     "test:tui": "bash tests/tui.sh",
     "test:toggle": "bash tests/toggle.sh",
