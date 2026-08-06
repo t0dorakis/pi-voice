@@ -32,6 +32,18 @@ const DEFAULT_CONFIG = {
   speed: 1.0,
   host: "127.0.0.1",
   port: 8181,
+  backend: "kokoro",
+  autoSpeak: "off",
+  chatterbox: {
+    host: "127.0.0.1",
+    port: 8182,
+    model: "mlx-community/chatterbox-multilingual-v3",
+    referenceAudio: "",
+    language: "auto",
+    fallbackLanguage: "en",
+    exaggeration: 0.1,
+    idleTimeoutMinutes: 30,
+  },
   events: {
     agent_end: {
       prompt: DEFAULT_SUMMARY_PROMPT,

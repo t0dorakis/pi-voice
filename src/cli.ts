@@ -30,6 +30,7 @@ import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { handleChatterboxCommand } from "./chatterbox-cli.ts";
 
 // ── Paths ──────────────────────────────────────────────────────────
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -464,6 +465,10 @@ Usage:
   pi-voice model unload               Unload current model
   pi-voice model download <name>      Download model without loading
   pi-voice model remove <name>        Unload and remove model files
+  pi-voice chatterbox setup <wav>     Configure a protected voice reference
+  pi-voice chatterbox start           Start the Chatterbox MLX service
+  pi-voice chatterbox stop            Stop the Chatterbox MLX service
+  pi-voice chatterbox status          Show Chatterbox service status
 
 Options:
   --host <host>   Override server host (default: 127.0.0.1)
@@ -519,6 +524,10 @@ async function main() {
         console.error("Available: list, load, unload, download, remove");
         process.exit(1);
     }
+  }
+
+  if (domain === "chatterbox") {
+    return await handleChatterboxCommand(command, rest);
   }
 
   console.error(`Unknown domain: ${domain}`);

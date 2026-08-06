@@ -89,6 +89,54 @@ Each event key enables auto-TTS for that event. The value is one of:
 
 Built-in pi events (`agent_end`, `turn_end`, `message_end`) use the message data from the event. Any other key is treated as a custom event on the shared `pi.events` bus.
 
+## Chatterbox on Apple Silicon
+
+This fork adds a managed [Chatterbox Multilingual v3](https://huggingface.co/mlx-community/chatterbox-multilingual-v3) backend through [MLX-Audio](https://github.com/Blaizzy/mlx-audio). It supports German, English, and 21 other languages with a protected local voice reference.
+
+Requirements:
+
+- Apple Silicon Mac
+- [`uv`](https://docs.astral.sh/uv/) on `PATH`
+- `ffmpeg` on `PATH` when Chatterbox playback speed is not `1.0`
+- A clean 5–15 second WAV recording that you have permission to clone
+
+Configure and start it:
+
+```bash
+pi-voice chatterbox setup /path/to/reference.wav
+pi-voice chatterbox start
+pi-voice chatterbox status
+```
+
+`setup` copies the recording to `~/.pi/voice/references/` with user-only permissions, selects Chatterbox, and enables exact-word auto-speech on `agent_settled`. Legacy event settings remain preserved but are inactive while exact mode is selected. The Python environment and a user-only authentication token are stored under `~/.pi/voice/chatterbox/`; model weights remain in the Hugging Face cache. The service refuses non-loopback bindings.
+
+Chatterbox starts lazily if exact auto-speech needs it and shuts down after 30 minutes of inactivity by default. The selected backend is authoritative: pi-voice attempts one Chatterbox restart after failure, then reports the failure instead of silently changing to Kokoro.
+
+Exact auto-speech preserves the assistant's wording while removing Markdown presentation syntax. New responses cancel older synthesis/playback so speech cannot build up behind the chat.
+
+Example configuration:
+
+```json
+{
+  "enabled": true,
+  "speed": 1.25,
+  "backend": "chatterbox",
+  "autoSpeak": "exact",
+  "chatterbox": {
+    "host": "127.0.0.1",
+    "port": 8182,
+    "model": "mlx-community/chatterbox-multilingual-v3",
+    "referenceAudio": "/Users/you/.pi/voice/references/default.wav",
+    "language": "auto",
+    "fallbackLanguage": "en",
+    "exaggeration": 0.1,
+    "idleTimeoutMinutes": 30
+  }
+}
+```
+
+Stop the backend manually with `pi-voice chatterbox stop`.
+
 ## CLI Reference
 
 ```bash
@@ -101,6 +149,12 @@ pi-voice model load <dtype>          # load a model (downloads first if needed)
 pi-voice model unload                # unload the active model, free memory
 pi-voice model download <dtype>      # download without loading
 pi-voice model remove <dtype>        # unload (if active) + delete cached files
+
+pi-voice chatterbox setup <wav>      # protect reference + select Chatterbox
+pi-voice chatterbox start            # install runtime if needed + start
+pi-voice chatterbox status           # show backend status
+pi-voice chatterbox restart          # restart after config/model changes
+pi-voice chatterbox stop             # release MLX memory
 ```
 
 Global options: `--host <host>`, `--port <port>`.

@@ -10,6 +10,7 @@ import {
   cleanTextForSpeech,
   extractLastMessage,
   extractTextContent,
+  normalizeExactSpeech,
   SPEED_VALUES,
   speedToIndex,
   voiceHint,
@@ -89,6 +90,22 @@ describe("cleanTextForSpeech", () => {
     assert.equal(
       cleanTextForSpeech("The quick brown fox (a fox!) jumps over 3.5 lazy dogs."),
       "The quick brown fox (a fox!) jumps over 3.5 lazy dogs.",
+    );
+  });
+});
+
+describe("normalizeExactSpeech", () => {
+  it("preserves exact prose while removing Markdown presentation", () => {
+    assert.equal(
+      normalizeExactSpeech("## Hallo\n\nDas ist **genau** so geschrieben."),
+      "Hallo\n\nDas ist genau so geschrieben.",
+    );
+  });
+
+  it("retains fenced code content instead of silently dropping it", () => {
+    assert.equal(
+      normalizeExactSpeech("before ```ts\nconst answer = 42;\n``` after"),
+      "before const answer = 42;\n after",
     );
   });
 });

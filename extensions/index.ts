@@ -28,9 +28,10 @@
  *     Uses session overrides > global defaults.
  */
 
-import { mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   createAgentSession,
@@ -48,7 +49,15 @@ import {
   saveConfig,
   type VoiceSessionState,
 } from "./config.ts";
-import { extractLastMessage, SPEED_VALUES, speedToIndex, voiceHint } from "./text.ts";
+import {
+  cleanTextForSpeech,
+  extractLastMessage,
+  extractTextContent,
+  normalizeExactSpeech,
+  SPEED_VALUES,
+  speedToIndex,
+  voiceHint,
+} from "./text.ts";
 
 // ── Event Types (exported) ──────────────────────────────────────
 
@@ -92,23 +101,9 @@ function getModelRuntime(): Promise<ModelRuntime> {
 async function generateSpeechText(
   prompt: string,
   context: string,
-  ctx: ExtensionContext,
-  modelConfig?: ModelConfig,
+  model: NonNullable<ExtensionContext["model"]>,
 ): Promise<string | null> {
   try {
-    // Resolve model: per-event model > active session model
-    const model = modelConfig
-      ? ctx.modelRegistry.find(modelConfig.provider, modelConfig.id)
-      : ctx.model;
-    if (!model) {
-      if (modelConfig) {
-        console.warn(`[pi-voice] Event model not found: ${modelConfig.provider}/${modelConfig.id}`);
-      } else {
-        console.warn("[pi-voice] No active model available for speech generation.");
-      }
-      return null;
-    }
-
     const userMessage = context
       ? `The following is a message from a conversation that you need to summarize:\n\n""""\n${context}\n""""`
       : "Generate speech text.";
@@ -167,7 +162,10 @@ async function generateSpeechText(
 export default function (pi: ExtensionAPI) {
   let defaults = loadConfig();
   let session: VoiceSessionState = {};
-  let currentCtx: ExtensionContext | undefined;
+  let lifecycleId = 0;
+  let finalAssistantText = "";
+  let activeModel: ExtensionContext["model"];
+  const configuredModels = new Map<string, NonNullable<ExtensionContext["model"]>>();
 
   function getEffective(): FullVoiceConfig {
     return {
@@ -176,12 +174,37 @@ export default function (pi: ExtensionAPI) {
       speed: session.speed ?? defaults.speed,
       host: defaults.host,
       port: defaults.port,
+      backend: defaults.backend,
+      autoSpeak: defaults.autoSpeak,
+      chatterbox: { ...defaults.chatterbox },
       events: defaults.events,
     };
   }
 
   function serverUrl(): string {
     return `http://${defaults.host}:${defaults.port}`;
+  }
+
+  function chatterboxUrl(config: FullVoiceConfig): string {
+    return `http://${config.chatterbox.host}:${config.chatterbox.port}`;
+  }
+
+  function refreshModelSnapshot(ctx: ExtensionContext): void {
+    activeModel = undefined;
+    configuredModels.clear();
+    if (defaults.autoSpeak === "exact") return;
+    activeModel = ctx.model;
+    for (const eventConfig of Object.values(defaults.events ?? {})) {
+      if (!("prompt" in eventConfig) || !eventConfig.model) continue;
+      const key = `${eventConfig.model.provider}/${eventConfig.model.id}`;
+      const model = ctx.modelRegistry.find(eventConfig.model.provider, eventConfig.model.id);
+      if (model) configuredModels.set(key, model);
+    }
+  }
+
+  function resolveSpeechModel(modelConfig?: ModelConfig): ExtensionContext["model"] {
+    if (!modelConfig) return activeModel;
+    return configuredModels.get(`${modelConfig.provider}/${modelConfig.id}`);
   }
 
   function persistSession() {
@@ -206,78 +229,219 @@ export default function (pi: ExtensionAPI) {
   const TMP_AUDIO_DIR = join(tmpdir(), "pi-voice");
   let tmpSeq = 0;
 
-  // Serializes audio playback so tts tool and auto-TTS never overlap.
   const audioQueue = createAudioQueue();
+  let speechSequence = 0;
+  let synthesisController: AbortController | undefined;
+  let cancelEnqueuedSpeech: (() => void) | undefined;
+  const CLI_BIN = resolve(dirname(fileURLToPath(import.meta.url)), "../bin/pi-voice.mjs");
+  const CHATTERBOX_TOKEN_PATH = resolve(homedir(), ".pi", "voice", "chatterbox", "auth-token");
+
+  function chatterboxAuthHeader(): string {
+    const token = readFileSync(CHATTERBOX_TOKEN_PATH, "utf8").trim();
+    if (!token) throw new Error("Chatterbox authentication token is missing");
+    return `Bearer ${token}`;
+  }
 
   // ── Speak + Auto-TTS (closured over pi) ─────────────────────
 
-  // Queued speak — fetches TTS audio and enqueues it for sequential playback.
+  function cancelSpeech(): void {
+    speechSequence++;
+    synthesisController?.abort();
+    synthesisController = undefined;
+    cancelEnqueuedSpeech?.();
+    cancelEnqueuedSpeech = undefined;
+    audioQueue.cancel();
+  }
+
+  function isAbort(error: unknown, signal: AbortSignal): boolean {
+    return signal.aborted || (error instanceof Error && error.name === "AbortError");
+  }
+
+  async function chatterboxHealth(config: FullVoiceConfig, signal: AbortSignal): Promise<boolean> {
+    try {
+      const response = await fetch(`${chatterboxUrl(config)}/health`, {
+        headers: { Authorization: chatterboxAuthHeader() },
+        signal: AbortSignal.any([signal, AbortSignal.timeout(1500)]),
+      });
+      return response.ok;
+    } catch (error) {
+      if (signal.aborted) throw error;
+      return false;
+    }
+  }
+
+  async function runChatterboxCommand(
+    command: "start" | "restart",
+    signal: AbortSignal,
+  ): Promise<void> {
+    const result = await pi.exec(CLI_BIN, ["chatterbox", command], {
+      signal,
+      timeout: 16 * 60 * 1000,
+    });
+    if (result.code !== 0) {
+      throw new Error(
+        `Chatterbox ${command} failed: ${result.stderr.trim() || result.stdout.trim() || `exit ${result.code}`}`,
+      );
+    }
+  }
+
+  async function ensureChatterbox(config: FullVoiceConfig, signal: AbortSignal): Promise<void> {
+    if (await chatterboxHealth(config, signal)) return;
+    // A prior cancelled MLX request can leave the single-threaded backend busy
+    // and unable to answer health checks. Restarting is safe for both first start
+    // and recovery, and guarantees the newest response can proceed.
+    await runChatterboxCommand("restart", signal);
+    if (!(await chatterboxHealth(config, signal))) {
+      throw new Error("Chatterbox did not become healthy after start");
+    }
+  }
+
+  async function responseError(response: Response): Promise<Error> {
+    try {
+      const data = (await response.json()) as { error?: string };
+      return new Error(data.error || `TTS request failed (${response.status})`);
+    } catch {
+      return new Error(`TTS request failed (${response.status})`);
+    }
+  }
+
+  async function requestAudio(
+    text: string,
+    config: FullVoiceConfig,
+    signal: AbortSignal,
+  ): Promise<Buffer> {
+    const chatterbox = config.backend === "chatterbox";
+    if (chatterbox) await ensureChatterbox(config, signal);
+
+    const url = chatterbox
+      ? `${chatterboxUrl(config)}/tts`
+      : `http://${config.host}:${config.port}/tts`;
+    const body = chatterbox
+      ? { text, language: config.chatterbox.language }
+      : { text, voice: config.voice, speed: config.speed };
+
+    const synthesize = async (): Promise<Buffer> => {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(chatterbox ? { Authorization: chatterboxAuthHeader() } : {}),
+        },
+        body: JSON.stringify(body),
+        signal,
+      });
+      if (!response.ok) throw await responseError(response);
+      return Buffer.from(await response.arrayBuffer());
+    };
+
+    try {
+      return await synthesize();
+    } catch (error) {
+      if (!chatterbox || isAbort(error, signal)) throw error;
+      await runChatterboxCommand("restart", signal);
+      return await synthesize();
+    }
+  }
+
+  // Synthesis and playback are newest-wins. Starting speech cancels both an
+  // older HTTP request and active audio; sequence checks prevent late bodies
+  // from ever reaching the player even if a fetch implementation ignores abort.
   async function speak(
     text: string,
     config: FullVoiceConfig,
     source: VoiceSpeakSource,
   ): Promise<void> {
-    const startEvent: VoiceSpeakStartEvent = {
+    cancelSpeech();
+    const sequence = speechSequence;
+    const lifecycle = lifecycleId;
+    const controller = new AbortController();
+    synthesisController = controller;
+    let ended = false;
+
+    const finish = (error?: unknown): void => {
+      if (ended) return;
+      ended = true;
+      // Async synthesis/playback may settle after /reload or session replacement.
+      // Never touch the stale extension API from the old lifecycle.
+      if (lifecycle !== lifecycleId) return;
+      const message = error instanceof Error ? error.message : error ? String(error) : undefined;
+      pi.events.emit("voice:speak_end", {
+        text,
+        source,
+        ...(message ? { error: message } : {}),
+      } satisfies VoiceSpeakEndEvent);
+    };
+
+    pi.events.emit("voice:speak_start", {
       text,
       voice: config.voice,
       speed: config.speed,
       source,
-    };
-    pi.events.emit("voice:speak_start", startEvent);
+    } satisfies VoiceSpeakStartEvent);
 
+    let outPath: string | undefined;
     try {
-      const body = {
-        text,
-        voice: config.voice,
-        speed: config.speed,
-      };
-
-      const res = await fetch(`http://${config.host}:${config.port}/tts`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-
-      if (!res.ok) {
-        const errData = (await res.json()) as { error: string };
-        throw new Error(errData.error);
+      const wavBuffer = await requestAudio(text, config, controller.signal);
+      if (controller.signal.aborted || sequence !== speechSequence || lifecycle !== lifecycleId) {
+        throw new DOMException("Cancelled by newer speech request", "AbortError");
       }
 
-      const wavBuffer = Buffer.from(await res.arrayBuffer());
-      const outPath = join(TMP_AUDIO_DIR, `voice-${process.pid}-${Date.now()}-${tmpSeq++}.wav`);
+      outPath = join(TMP_AUDIO_DIR, `voice-${process.pid}-${Date.now()}-${tmpSeq++}.wav`);
       mkdirSync(TMP_AUDIO_DIR, { recursive: true });
       writeFileSync(outPath, wavBuffer);
+      const path = outPath;
+      const cancelThisSpeech = () => {
+        finish(new DOMException("Cancelled by newer speech request", "AbortError"));
+        try {
+          unlinkSync(path);
+        } catch {
+          /* active playback may still own the file */
+        }
+      };
+      cancelEnqueuedSpeech = cancelThisSpeech;
 
       audioQueue.enqueue({
-        play: async () => {
-          let playbackError: Error | null = null;
+        play: async (playbackSignal) => {
+          let playbackError: unknown;
           try {
-            await playWav(outPath);
-          } catch (err) {
-            playbackError = err instanceof Error ? err : new Error(String(err));
-            console.warn("[pi-voice] Playback error:", playbackError);
-          }
-          const endEvent: VoiceSpeakEndEvent = {
-            text,
-            source,
-            ...(playbackError ? { error: playbackError.message } : {}),
-          };
-          pi.events.emit("voice:speak_end", endEvent);
-          try {
-            unlinkSync(outPath);
-          } catch {
-            /* ignore */
+            if (sequence !== speechSequence || lifecycle !== lifecycleId) {
+              throw new DOMException("Cancelled by newer speech request", "AbortError");
+            }
+            await playWav(path, {
+              speed: config.backend === "chatterbox" ? config.speed : 1,
+              signal: playbackSignal,
+            });
+          } catch (error) {
+            playbackError = error;
+            if (!isAbort(error, playbackSignal)) {
+              console.warn("[pi-voice] Playback error:", error);
+            }
+          } finally {
+            if (cancelEnqueuedSpeech === cancelThisSpeech) cancelEnqueuedSpeech = undefined;
+            finish(playbackError);
+            try {
+              unlinkSync(path);
+            } catch {
+              /* ignore */
+            }
           }
         },
       });
+      outPath = undefined;
     } catch (error) {
-      console.warn("[pi-voice] TTS error:", error);
-      const endEvent: VoiceSpeakEndEvent = {
-        text,
-        source,
-        error: error instanceof Error ? error.message : String(error),
-      };
-      pi.events.emit("voice:speak_end", endEvent);
+      if (!isAbort(error, controller.signal)) {
+        console.warn(`[pi-voice] ${config.backend} TTS error:`, error);
+      }
+      finish(error);
+    } finally {
+      if (synthesisController === controller) synthesisController = undefined;
+      if (outPath) {
+        try {
+          unlinkSync(outPath);
+        } catch {
+          /* ignore */
+        }
+      }
     }
   }
 
@@ -285,31 +449,29 @@ export default function (pi: ExtensionAPI) {
     eventName: string,
     // biome-ignore lint/suspicious/noExplicitAny: event shape varies by event type
     event: any,
-    ctx: ExtensionContext,
     config: FullVoiceConfig,
+    model: ExtensionContext["model"],
   ): Promise<void> {
+    const lifecycle = lifecycleId;
     try {
-      if (!config.enabled) return;
+      if (!config.enabled || config.autoSpeak === "exact") return;
       if (!config.events?.[eventName]) return;
-      // model is optional per-event — falls back to ctx.model
 
       const eventConfig = config.events[eventName];
-
-      // Direct text — speak immediately, no LLM
       if ("text" in eventConfig) {
         await speak(eventConfig.text, config, "auto");
         return;
       }
 
-      // Summarize — extract context and run through LLM
-
       const context = extractLastMessage(event);
-      if (!context) return;
+      if (!context || !model) {
+        if (!model) console.warn("[pi-voice] No model available for speech generation.");
+        return;
+      }
 
-      const text = await generateSpeechText(eventConfig.prompt, context, ctx, eventConfig.model);
-      if (!text) return;
-
-      await speak(text, config, "auto");
+      const text = await generateSpeechText(eventConfig.prompt, context, model);
+      if (lifecycle !== lifecycleId) return;
+      if (text) await speak(text, config, "auto");
     } catch (error) {
       console.warn("[pi-voice] Auto-TTS error:", error);
     }
@@ -317,15 +479,19 @@ export default function (pi: ExtensionAPI) {
 
   // ── Server API helpers ─────────────────────────────────────────
 
-  async function fetchHealth() {
+  async function fetchHealth(config: FullVoiceConfig = getEffective()) {
     try {
-      const res = await fetch(`${serverUrl()}/health`);
+      const baseUrl = config.backend === "chatterbox" ? chatterboxUrl(config) : serverUrl();
+      const res = await fetch(`${baseUrl}/health`, {
+        headers:
+          config.backend === "chatterbox" ? { Authorization: chatterboxAuthHeader() } : undefined,
+      });
       if (!res.ok) return null;
       return (await res.json()) as {
         status: string;
-        activeDtype: string | null;
+        activeDtype?: string | null;
         modelLoaded: boolean;
-        loading: boolean;
+        loading?: boolean;
       };
     } catch {
       return null;
@@ -346,9 +512,9 @@ export default function (pi: ExtensionAPI) {
     handler: async (_args, ctx) => {
       const effective = getEffective();
 
-      const health = await fetchHealth();
+      const health = await fetchHealth(effective);
       let voices: string[] = [];
-      if (health?.modelLoaded) {
+      if (effective.backend === "kokoro" && health?.modelLoaded) {
         try {
           voices = await fetchVoices();
         } catch {
@@ -384,48 +550,7 @@ export default function (pi: ExtensionAPI) {
         async function playSampleTts() {
           const voice = voices.length > 0 ? voices[voiceIdx] : defaults.voice;
           const speed = Number.parseFloat(SPEED_VALUES[speedIdx]);
-          pi.events.emit("voice:speak_start", {
-            text: sampleText,
-            voice,
-            speed,
-            source: "sample",
-          });
-          try {
-            const res = await fetch(`${serverUrl()}/tts`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                text: sampleText,
-                voice,
-                speed,
-              }),
-            });
-            if (!res.ok) {
-              const errData = (await res.json()) as { error: string };
-              throw new Error(errData.error || "Server error");
-            }
-            const wavBuffer = Buffer.from(await res.arrayBuffer());
-            const outPath = join(TMP_AUDIO_DIR, `voice-sample-${process.pid}.wav`);
-            mkdirSync(TMP_AUDIO_DIR, { recursive: true });
-            writeFileSync(outPath, wavBuffer);
-            try {
-              await playWav(outPath);
-            } finally {
-              try {
-                unlinkSync(outPath);
-              } catch {
-                /* ignore */
-              }
-            }
-            pi.events.emit("voice:speak_end", { text: sampleText, source: "sample" });
-          } catch (error) {
-            pi.events.emit("voice:speak_end", {
-              text: sampleText,
-              source: "sample",
-              error: error instanceof Error ? error.message : String(error),
-            });
-            throw error;
-          }
+          await speak(sampleText, { ...effective, voice, speed }, "sample");
         }
 
         return {
@@ -438,7 +563,9 @@ export default function (pi: ExtensionAPI) {
             // Server status
             const statusText = health
               ? health.modelLoaded
-                ? `● Server running (${health.activeDtype})`
+                ? effective.backend === "chatterbox"
+                  ? "● Chatterbox running"
+                  : `● Kokoro running (${health.activeDtype})`
                 : health.loading
                   ? "◐ Server loading…"
                   : "○ Server up (no model)"
@@ -451,11 +578,11 @@ export default function (pi: ExtensionAPI) {
                   ? "dim"
                   : "dim";
             lines.push(`  ${theme.fg(statusColor, statusText)}`);
+            const serviceCommand =
+              effective.backend === "chatterbox" ? "pi-voice chatterbox" : "pi-voice server";
             const serverHint = health?.modelLoaded
-              ? theme.fg("dim", "  pi-voice server stop to stop")
-              : health
-                ? theme.fg("dim", "  pi-voice server start to start")
-                : theme.fg("dim", "  pi-voice server start to start");
+              ? theme.fg("dim", `  ${serviceCommand} stop to stop`)
+              : theme.fg("dim", `  ${serviceCommand} start to start`);
             lines.push(serverHint);
 
             // Active events
@@ -604,7 +731,7 @@ export default function (pi: ExtensionAPI) {
     name: "tts",
     label: "Text to Speech",
     description:
-      "Convert text to speech audio using the Kokoro TTS server. Saves a WAV file and plays it.",
+      "Convert text to speech using the selected pi-voice backend, then play the generated WAV.",
     promptSnippet: "Convert text to speech and play audio",
     promptGuidelines: [
       "Use tts when the user wants to hear text spoken aloud or convert text to audio.",
@@ -639,12 +766,19 @@ export default function (pi: ExtensionAPI) {
 
       const voice = params.voice ?? effective.voice;
       const speed = params.speed ?? effective.speed;
+      const speechText = cleanTextForSpeech(params.text);
+      if (!speechText) {
+        return {
+          content: [{ type: "text" as const, text: "There is no speakable text." }],
+          details: {},
+        };
+      }
 
-      speak(params.text, { ...effective, voice, speed }, "tool").catch(() => {
+      speak(speechText, { ...effective, voice, speed }, "tool").catch(() => {
         /* errors already logged inside speak */
       });
 
-      const preview = params.text.length > 80 ? `${params.text.slice(0, 80)}…` : params.text;
+      const preview = speechText.length > 80 ? `${speechText.slice(0, 80)}…` : speechText;
       return {
         content: [{ type: "text" as const, text: `Speaking: "${preview}"` }],
         details: {},
@@ -654,31 +788,45 @@ export default function (pi: ExtensionAPI) {
 
   // ── Status bar ────────────────────────────────────────────────
 
-  function updateStatusBar() {
-    if (!currentCtx) return;
+  function updateStatusBar(ctx: ExtensionContext) {
     const effective = getEffective();
-    const theme = currentCtx.ui.theme;
+    const theme = ctx.ui.theme;
     const icon = effective.enabled ? theme.fg("success", "\u266A") : theme.fg("dim", "\u266A");
-    currentCtx.ui.setStatus("pi-voice", icon);
+    ctx.ui.setStatus("pi-voice", icon);
   }
 
   // ── Session lifecycle ──────────────────────────────────────────
 
   pi.on("session_start", async (_event, ctx) => {
-    currentCtx = ctx;
+    cancelSpeech();
+    lifecycleId++;
+    finalAssistantText = "";
     restoreSession(ctx);
-    updateStatusBar();
+    refreshModelSnapshot(ctx);
+    updateStatusBar(ctx);
   });
 
   pi.on("session_tree", async (_event, ctx) => {
-    currentCtx = ctx;
+    cancelSpeech();
+    lifecycleId++;
+    finalAssistantText = "";
     restoreSession(ctx);
-    updateStatusBar();
+    refreshModelSnapshot(ctx);
+    updateStatusBar(ctx);
   });
 
-  // Update status bar on voice:config events (from TUI, alt+v, etc.)
-  pi.events.on("voice:config", () => {
-    updateStatusBar();
+  pi.on("session_shutdown", async () => {
+    lifecycleId++;
+    finalAssistantText = "";
+    activeModel = undefined;
+    configuredModels.clear();
+    cancelSpeech();
+    for (const unsubscribe of customUnsubs) unsubscribe();
+    customUnsubs.length = 0;
+  });
+
+  pi.on("model_select", async (_event, ctx) => {
+    refreshModelSnapshot(ctx);
   });
 
   // ── Global toggle shortcut (alt+v) ────────────────────────────
@@ -696,6 +844,7 @@ export default function (pi: ExtensionAPI) {
         voice: effective.voice,
         speed: effective.speed,
       });
+      updateStatusBar(ctx);
     },
   });
 
@@ -705,28 +854,56 @@ export default function (pi: ExtensionAPI) {
   // Each handler checks at runtime if the event is configured.
   // Note: pi.on() requires literal event names (not variables) for type safety.
 
-  pi.on("agent_end", async (event, ctx) => {
+  pi.on("agent_start", async () => {
+    finalAssistantText = "";
+    if (getEffective().autoSpeak === "exact") cancelSpeech();
+  });
+
+  pi.on("agent_end", async (event) => {
     const effective = getEffective();
-    handleAutoTTS("agent_end", event, ctx, effective).catch((err) =>
+    const eventConfig = effective.events?.agent_end;
+    const model =
+      eventConfig && "prompt" in eventConfig ? resolveSpeechModel(eventConfig.model) : activeModel;
+    handleAutoTTS("agent_end", event, effective, model).catch((err) =>
       console.warn("[pi-voice] Auto-TTS error:", err),
     );
   });
 
-  pi.on("turn_end", async (event, ctx) => {
+  pi.on("turn_end", async (event) => {
     const effective = getEffective();
-    handleAutoTTS("turn_end", event, ctx, effective).catch((err) =>
+    const eventConfig = effective.events?.turn_end;
+    const model =
+      eventConfig && "prompt" in eventConfig ? resolveSpeechModel(eventConfig.model) : activeModel;
+    handleAutoTTS("turn_end", event, effective, model).catch((err) =>
       console.warn("[pi-voice] Auto-TTS error:", err),
     );
   });
 
-  pi.on("message_end", async (event, ctx) => {
+  pi.on("message_end", async (event) => {
     const effective = getEffective();
-    handleAutoTTS("message_end", event, ctx, effective).catch((err) =>
+    if (event.message.role === "assistant") {
+      finalAssistantText = extractTextContent(event.message.content);
+    }
+    const eventConfig = effective.events?.message_end;
+    const model =
+      eventConfig && "prompt" in eventConfig ? resolveSpeechModel(eventConfig.model) : activeModel;
+    handleAutoTTS("message_end", event, effective, model).catch((err) =>
       console.warn("[pi-voice] Auto-TTS error:", err),
     );
   });
 
-  const builtinEventNames = new Set(["agent_end", "turn_end", "message_end"]);
+  pi.on("agent_settled", () => {
+    const effective = getEffective();
+    if (!effective.enabled || effective.autoSpeak !== "exact") return;
+    const text = normalizeExactSpeech(finalAssistantText);
+    if (text) {
+      void speak(text, effective, "auto").catch((error) => {
+        console.warn("[pi-voice] Exact auto-TTS error:", error);
+      });
+    }
+  });
+
+  const builtinEventNames = new Set(["agent_end", "agent_settled", "turn_end", "message_end"]);
 
   // Custom events from other extensions (via shared event bus).
   // Any event name in config that isn't a built-in pi event is treated
@@ -746,9 +923,13 @@ export default function (pi: ExtensionAPI) {
     for (const eventName of Object.keys(events)) {
       if (builtinEventNames.has(eventName)) continue;
       const unsub = pi.events.on(eventName, (data: unknown) => {
-        if (!currentCtx) return;
         const effective = getEffective();
-        handleAutoTTS(eventName, data, currentCtx, effective).catch((err) =>
+        const eventConfig = effective.events?.[eventName];
+        const model =
+          eventConfig && "prompt" in eventConfig
+            ? resolveSpeechModel(eventConfig.model)
+            : activeModel;
+        handleAutoTTS(eventName, data, effective, model).catch((err) =>
           console.warn("[pi-voice] Auto-TTS error:", err),
         );
       });

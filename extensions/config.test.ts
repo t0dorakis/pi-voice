@@ -46,6 +46,9 @@ describe("loadConfig", () => {
     assert.equal(config.voice, DEFAULT_CONFIG.voice);
     assert.equal(config.host, DEFAULT_CONFIG.host);
     assert.equal(config.port, DEFAULT_CONFIG.port);
+    assert.equal(config.backend, "kokoro");
+    assert.equal(config.autoSpeak, "off");
+    assert.deepEqual(config.chatterbox, DEFAULT_CONFIG.chatterbox);
   });
 
   it("does NOT merge events: a config without events disables auto-TTS", () => {
@@ -81,6 +84,12 @@ describe("saveConfig", () => {
       speed: 2.0,
       host: "127.0.0.1",
       port: 9999,
+      backend: "chatterbox" as const,
+      autoSpeak: "exact" as const,
+      chatterbox: {
+        ...DEFAULT_CONFIG.chatterbox,
+        referenceAudio: "/tmp/reference.wav",
+      },
     };
     saveConfig(config, configPath);
     const raw = JSON.parse(readFileSync(configPath, "utf-8"));
