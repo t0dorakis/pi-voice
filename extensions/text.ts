@@ -74,6 +74,15 @@ export function extractTextContent(content: any[] | undefined): string {
 }
 
 /**
+ * Preserve the response's wording while removing Markdown presentation syntax.
+ * Unlike cleanTextForSpeech, fenced code content is retained so exact auto-speech
+ * never silently drops words written by the assistant.
+ */
+export function normalizeExactSpeech(text: string): string {
+  return cleanTextForSpeech(text.replace(/```[^\n]*\n?([\s\S]*?)```/g, "$1"));
+}
+
+/**
  * Strip markdown syntax so the synthesizer speaks words, not symbols.
  * Fenced code blocks are dropped entirely (spoken code is noise); inline
  * code keeps its text; links/images keep their label/alt. Applied

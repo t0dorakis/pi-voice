@@ -16,7 +16,7 @@
  */
 
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
@@ -26,6 +26,7 @@ import extensionFactory from "./index.js";
 
 const CONFIG_DIR = resolve(homedir(), ".pi", "voice");
 const CONFIG_PATH = resolve(CONFIG_DIR, "config.json");
+const CHATTERBOX_TOKEN_PATH = resolve(CONFIG_DIR, "chatterbox", "auth-token");
 const KEY_ESCAPE = "\x1b";
 const KEY_ENTER = "\r";
 const KEY_LEFT = "\x1b[D";
@@ -63,17 +64,20 @@ interface VoiceSpeakEndEvent {
 // ── Config backup / restore ────────────────────────────────────────
 
 let configBackup: string | null = null;
+let tokenBackup: string | null = null;
 
 function backupConfig() {
   try {
-    if (existsSync(CONFIG_PATH)) {
-      configBackup = readFileSync(CONFIG_PATH, "utf-8");
-    } else {
-      configBackup = null;
-    }
+    configBackup = existsSync(CONFIG_PATH) ? readFileSync(CONFIG_PATH, "utf-8") : null;
+    tokenBackup = existsSync(CHATTERBOX_TOKEN_PATH)
+      ? readFileSync(CHATTERBOX_TOKEN_PATH, "utf-8")
+      : null;
   } catch {
     configBackup = null;
+    tokenBackup = null;
   }
+  mkdirSync(resolve(CONFIG_DIR, "chatterbox"), { recursive: true });
+  writeFileSync(CHATTERBOX_TOKEN_PATH, "test-token\n");
 }
 
 function restoreConfig() {
@@ -83,6 +87,15 @@ function restoreConfig() {
     } else {
       try {
         unlinkSync(CONFIG_PATH);
+      } catch {
+        /* already gone */
+      }
+    }
+    if (tokenBackup !== null) {
+      writeFileSync(CHATTERBOX_TOKEN_PATH, tokenBackup);
+    } else {
+      try {
+        unlinkSync(CHATTERBOX_TOKEN_PATH);
       } catch {
         /* already gone */
       }
@@ -180,6 +193,11 @@ function createMockPi() {
   return {
     _emitted,
     _entries: [] as Array<{ customType: string; data: unknown }>,
+    _execCalls: [] as Array<{ command: string; args: string[] }>,
+    async exec(command: string, args: string[]) {
+      this._execCalls.push({ command, args });
+      return { code: 0, stdout: "", stderr: "", killed: false };
+    },
     events: {
       emit(event: string, data: unknown) {
         _emitted.push({ event, data });
@@ -262,6 +280,10 @@ function mockFetch(responses?: {
 function createMockCtx(overrides: Record<string, unknown> = {}) {
   return {
     ui: {
+      theme: {
+        fg: (_color: string, text: string) => text,
+      },
+      setStatus() {},
       // biome-ignore lint/suspicious/noExplicitAny: mock factory is intentionally any
       async custom(factory: any) {
         tuiPromise = new Promise((resolve) => {
@@ -292,6 +314,14 @@ function createMockCtx(overrides: Record<string, unknown> = {}) {
 function getEvents(pi: any, name: string): Array<{ event: string; data: unknown }> {
   // biome-ignore lint/suspicious/noExplicitAny: filter callback uses any for flexibility
   return pi._emitted.filter((e: any) => e.event === name);
+}
+
+async function waitFor(predicate: () => boolean, timeout = 2000): Promise<void> {
+  const deadline = Date.now() + timeout;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("Timed out waiting for condition");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
 
 // ── Test suite ─────────────────────────────────────────────────────
@@ -572,7 +602,7 @@ describe("pi-voice event system", () => {
       extensionFactory(pi as any);
 
       await tools.tts.execute("tc_1", { text: "Shape" }, undefined, undefined, createMockCtx());
-      await new Promise((r) => setTimeout(r, PLAYBACK_SETTLE));
+      await waitFor(() => getEvents(pi, "voice:speak_end").length > 0, 3000);
 
       const payload = getEvents(pi, "voice:speak_end")[0].data as VoiceSpeakEndEvent;
       assert.ok("text" in payload, "Should have text");
@@ -633,6 +663,227 @@ describe("pi-voice event system", () => {
       const starts = getEvents(pi, "voice:speak_start").length;
       const ends = getEvents(pi, "voice:speak_end").length;
       assert.equal(ends, starts, "speak_end count should match speak_start count");
+    });
+  });
+
+  // ── exact Chatterbox auto-speech ───────────────────────────────
+
+  describe("exact Chatterbox auto-speech", () => {
+    function configureExact() {
+      writeTestConfig({
+        backend: "chatterbox",
+        autoSpeak: "exact",
+        chatterbox: {
+          host: "127.0.0.1",
+          port: 8182,
+          language: "auto",
+        },
+      });
+    }
+
+    it("speaks the final assistant wording at agent_settled without legacy summaries", async () => {
+      configureExact();
+      const requests: Array<{ url: string; body?: Record<string, unknown> }> = [];
+      globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        requests.push({
+          url,
+          body: init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined,
+        });
+        if (url.endsWith("/health")) {
+          return new Response(JSON.stringify({ status: "ok", modelLoaded: true }), { status: 200 });
+        }
+        return new Response(createValidWav(), { status: 200 });
+      }) as typeof fetch;
+
+      const pi = createMockPi();
+      // biome-ignore lint/suspicious/noExplicitAny: mock pi cast
+      extensionFactory(pi as any);
+      const ctx = createMockCtx({
+        modelRegistry: { find: () => assert.fail("exact speech must not resolve a summary model") },
+      });
+      await piEventHandlers.session_start({}, ctx);
+
+      await piEventHandlers.message_end(
+        {
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "## Genau\nDas ist **meine** Formulierung." }],
+          },
+        },
+        ctx,
+      );
+      await piEventHandlers.turn_end({ message: { role: "assistant", content: [] } }, ctx);
+      await piEventHandlers.agent_end({ messages: [] }, ctx);
+      assert.equal(requests.length, 0, "legacy events must not synthesize in exact mode");
+
+      await piEventHandlers.agent_settled({}, ctx);
+      await waitFor(() => requests.some((request) => request.url.endsWith("/tts")));
+
+      const start = getEvents(pi, "voice:speak_start")[0].data as VoiceSpeakStartEvent;
+      assert.equal(start.text, "Genau\nDas ist meine Formulierung.");
+      const tts = requests.find((request) => request.url.endsWith("/tts"));
+      assert.equal(tts?.url, "http://127.0.0.1:8182/tts");
+      assert.equal(tts?.body?.text, start.text);
+      assert.equal(pi._execCalls.length, 0, "healthy Chatterbox must remain lazy");
+    });
+
+    it("does not fall back to Kokoro when Chatterbox startup fails", async () => {
+      configureExact();
+      const urls: string[] = [];
+      globalThis.fetch = (async (input: string | URL | Request) => {
+        const url = typeof input === "string" ? input : input.toString();
+        urls.push(url);
+        return new Response(JSON.stringify({ error: "offline" }), { status: 503 });
+      }) as typeof fetch;
+
+      const pi = createMockPi();
+      pi.exec = async function (command: string, args: string[]) {
+        this._execCalls.push({ command, args });
+        return { code: 1, stdout: "", stderr: "start failed", killed: false };
+      };
+      // biome-ignore lint/suspicious/noExplicitAny: mock pi cast
+      extensionFactory(pi as any);
+
+      await piEventHandlers.message_end(
+        { message: { role: "assistant", content: [{ type: "text", text: "Only Chatterbox" }] } },
+        createMockCtx(),
+      );
+      await piEventHandlers.agent_settled({}, createMockCtx());
+      await waitFor(() => getEvents(pi, "voice:speak_end").length === 1);
+
+      assert.ok(urls.every((url) => url.startsWith("http://127.0.0.1:8182")));
+      assert.deepEqual(pi._execCalls[0].args, ["chatterbox", "restart"]);
+      assert.match(
+        (getEvents(pi, "voice:speak_end")[0].data as VoiceSpeakEndEvent).error ?? "",
+        /start failed/,
+      );
+    });
+
+    it("restarts Chatterbox and retries synthesis exactly once", async () => {
+      configureExact();
+      let ttsCalls = 0;
+      globalThis.fetch = (async (input: string | URL | Request) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.endsWith("/health")) {
+          return new Response(JSON.stringify({ status: "ok", modelLoaded: true }), { status: 200 });
+        }
+        ttsCalls++;
+        if (ttsCalls === 1) {
+          return new Response(JSON.stringify({ error: "synthesis failed" }), { status: 500 });
+        }
+        return new Response(createValidWav(), { status: 200 });
+      }) as typeof fetch;
+
+      const pi = createMockPi();
+      // biome-ignore lint/suspicious/noExplicitAny: mock pi cast
+      extensionFactory(pi as any);
+      await piEventHandlers.message_end(
+        { message: { role: "assistant", content: [{ type: "text", text: "Retry me" }] } },
+        createMockCtx(),
+      );
+      await piEventHandlers.agent_settled({}, createMockCtx());
+      await waitFor(() => ttsCalls === 2);
+
+      assert.equal(ttsCalls, 2);
+      assert.deepEqual(
+        pi._execCalls.map((call: { args: string[] }) => call.args),
+        [["chatterbox", "restart"]],
+      );
+    });
+
+    it("cancels stale synthesis so only the newest response can play", async () => {
+      configureExact();
+      let firstResolve: ((response: Response) => void) | undefined;
+      const ttsTexts: string[] = [];
+      globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.endsWith("/health")) {
+          return new Response(JSON.stringify({ status: "ok", modelLoaded: true }), { status: 200 });
+        }
+        const text = (JSON.parse(String(init?.body)) as { text: string }).text;
+        ttsTexts.push(text);
+        if (text === "Old response") {
+          return new Promise<Response>((resolve) => {
+            firstResolve = resolve;
+          });
+        }
+        return new Response(createValidWav(), { status: 200 });
+      }) as typeof fetch;
+
+      const pi = createMockPi();
+      // biome-ignore lint/suspicious/noExplicitAny: mock pi cast
+      extensionFactory(pi as any);
+      const ctx = createMockCtx();
+      await piEventHandlers.message_end(
+        { message: { role: "assistant", content: [{ type: "text", text: "Old response" }] } },
+        ctx,
+      );
+      const oldSettled = piEventHandlers.agent_settled({}, ctx);
+      await waitFor(() => firstResolve !== undefined);
+
+      await piEventHandlers.agent_start({}, ctx);
+      await piEventHandlers.message_end(
+        { message: { role: "assistant", content: [{ type: "text", text: "Newest response" }] } },
+        ctx,
+      );
+      const newestSettled = piEventHandlers.agent_settled({}, ctx);
+      await waitFor(() => ttsTexts.includes("Newest response"));
+      firstResolve?.(new Response(createValidWav(), { status: 200 }));
+      await Promise.all([oldSettled, newestSettled]);
+      await new Promise((resolve) => setTimeout(resolve, PLAYBACK_SETTLE));
+
+      const successful = getEvents(pi, "voice:speak_end")
+        .map((event) => event.data as VoiceSpeakEndEvent)
+        .filter((event) => !event.error);
+      assert.deepEqual(
+        successful.map((event) => event.text),
+        ["Newest response"],
+      );
+    });
+
+    it("does not use an event context after session shutdown", async () => {
+      configureExact();
+      let resolveTts: ((response: Response) => void) | undefined;
+      globalThis.fetch = (async (input: string | URL | Request) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.endsWith("/health")) {
+          return new Response(JSON.stringify({ status: "ok", modelLoaded: true }), { status: 200 });
+        }
+        return new Promise<Response>((resolve) => {
+          resolveTts = resolve;
+        });
+      }) as typeof fetch;
+
+      let stale = false;
+      let staleReads = 0;
+      const ctx = new Proxy(createMockCtx(), {
+        get(target, property, receiver) {
+          if (stale) staleReads++;
+          return Reflect.get(target, property, receiver);
+        },
+      });
+      const pi = createMockPi();
+      // biome-ignore lint/suspicious/noExplicitAny: mock pi cast
+      extensionFactory(pi as any);
+      await piEventHandlers.message_end(
+        { message: { role: "assistant", content: [{ type: "text", text: "Old session" }] } },
+        ctx,
+      );
+      const settled = piEventHandlers.agent_settled({}, ctx);
+      await waitFor(() => resolveTts !== undefined);
+      stale = true;
+      await piEventHandlers.session_shutdown({}, ctx);
+      resolveTts?.(new Response(createValidWav(), { status: 200 }));
+      await settled;
+
+      assert.equal(staleReads, 0);
+      assert.equal(
+        getEvents(pi, "voice:speak_end").filter(
+          (event) => !(event.data as VoiceSpeakEndEvent).error,
+        ).length,
+        0,
+      );
     });
   });
 
