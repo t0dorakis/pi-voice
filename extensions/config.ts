@@ -44,6 +44,12 @@ export interface ChatterboxConfig {
   idleTimeoutMinutes: number;
 }
 
+export interface HerdrConfig {
+  enabled: boolean;
+  model: ModelConfig;
+  piTitleBridge: boolean;
+}
+
 export interface FullVoiceConfig {
   enabled: boolean;
   voice: string;
@@ -53,6 +59,7 @@ export interface FullVoiceConfig {
   backend: VoiceBackend;
   autoSpeak: AutoSpeakMode;
   chatterbox: ChatterboxConfig;
+  herdr?: HerdrConfig;
   events?: Record<string, EventConfig>;
 }
 
@@ -98,6 +105,13 @@ const _VoiceConfigSchema = Type.Object({
       fallbackLanguage: Type.Optional(Type.String({ default: "en" })),
       exaggeration: Type.Optional(Type.Number({ minimum: 0, maximum: 1, default: 0.1 })),
       idleTimeoutMinutes: Type.Optional(Type.Number({ minimum: 0, default: 30 })),
+    }),
+  ),
+  herdr: Type.Optional(
+    Type.Object({
+      enabled: Type.Boolean(),
+      model: ModelSchema,
+      piTitleBridge: Type.Boolean(),
     }),
   ),
   events: Type.Optional(Type.Record(Type.String(), EventConfigSchema)),
@@ -164,6 +178,7 @@ export function loadConfig(configPath: string = CONFIG_PATH): FullVoiceConfig {
           ...DEFAULT_CONFIG.chatterbox,
           ...(raw.chatterbox ?? {}),
         },
+        herdr: raw.herdr,
         events: raw.events,
       };
     }
