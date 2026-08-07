@@ -61,6 +61,7 @@ export interface EventOperations {
   summarize(text: string, previousTitle: string | undefined, signal: AbortSignal): Promise<string>;
   startChatterbox(signal: AbortSignal): Promise<void>;
   synthesize(text: string, signal: AbortSignal): Promise<Buffer>;
+  playPing(signal: AbortSignal): Promise<void>;
   play(wavPath: string, signal: AbortSignal): Promise<void>;
   renamePane(paneId: string, title: string, signal: AbortSignal): Promise<void>;
   renameWorkspace(workspaceId: string, title: string, signal: AbortSignal): Promise<void>;
@@ -329,8 +330,11 @@ function createOperations(
       if (!response.ok) throw new Error(`Chatterbox synthesis failed (${response.status}).`);
       return Buffer.from(await response.arrayBuffer());
     },
+    playPing: async (signal) => {
+      await track("/usr/bin/afplay", ["/System/Library/Sounds/Ping.aiff"], signal);
+    },
     play: async (wavPath, signal) => {
-      await track("afplay", [wavPath], signal);
+      await track("/usr/bin/afplay", [wavPath], signal);
     },
     renamePane: async (paneId, title, signal) => {
       await track(herdr, ["pane", "rename", paneId, title], signal);
@@ -361,6 +365,7 @@ function paneMatchesStatus(
 
 async function speakAnnouncement(
   announcement: string,
+  pingFirst: boolean,
   paneId: string,
   eventStatus: string,
   env: NodeJS.ProcessEnv,
@@ -381,7 +386,16 @@ async function speakAnnouncement(
     writeFileSync(wavPath, wav, { mode: 0o600 });
     chmodSync(wavPath, 0o600);
     if (!stillNewest(directory, owner)) return;
+    if (pingFirst) {
+      await operations.playPing(signal);
+      if (!stillNewest(directory, owner)) return;
+    }
     await operations.play(wavPath, signal);
+    console.log(
+      pingFirst
+        ? "[pi-voice] Played background ping and named-agent status."
+        : "[pi-voice] Played focused-pane settled summary.",
+    );
   } finally {
     rmSync(temporary, { recursive: true, force: true });
   }
@@ -547,8 +561,14 @@ export async function runHerdrEvent(
       }
     }
 
+    const speech = latest.focused
+      ? announcement.announcement
+      : eventStatus === "blocked"
+        ? `Der Agent ${announcement.title} benötigt deine Aufmerksamkeit.`
+        : `Der Agent ${announcement.title} ist fertig.`;
     await speakAnnouncement(
-      announcement.announcement,
+      speech,
+      !latest.focused,
       event.paneId,
       eventStatus,
       env,
