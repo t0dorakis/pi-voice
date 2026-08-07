@@ -39,7 +39,7 @@ import {
   ModelRuntime,
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
-import { matchesKey } from "@earendil-works/pi-tui";
+import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { createAudioQueue, playWav } from "./audio.ts";
 import {
@@ -554,7 +554,7 @@ export default function (pi: ExtensionAPI) {
         }
 
         return {
-          render(_width: number) {
+          render(width: number) {
             const lines: string[] = [];
 
             // Title
@@ -632,7 +632,7 @@ export default function (pi: ExtensionAPI) {
               theme.fg("dim", " ↑↓ navigate • ←→ change • s save default • r reset • esc close"),
             );
 
-            return lines;
+            return lines.map((line) => truncateToWidth(line, width, ""));
           },
           invalidate() {},
           handleInput(data: string) {
