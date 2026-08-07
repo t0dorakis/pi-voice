@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   boundedRecentText,
   decidePaneRename,
+  focusedSpeechLead,
   parseAnnouncement,
   parseStatusEvent,
   stablePathKey,
@@ -38,6 +39,20 @@ describe("Herdr spoken status pure logic", () => {
       parseStatusEvent(JSON.stringify({ event: "pane.focused", data: { pane_id: "w1:p2" } })),
       { paneId: "w1:p2", cancellation: true },
     );
+  });
+
+  it("extracts a short exact lead from the settled response", () => {
+    assert.equal(
+      focusedSpeechLead(
+        "Die Optimierung ist fertig und kann jetzt getestet werden. Mehr Details folgen.",
+      ),
+      "Die Optimierung ist fertig und kann jetzt getestet werden.",
+    );
+    assert.equal(
+      focusedSpeechLead("eins zwei drei vier fünf sechs sieben acht neun zehn elf zwölf dreizehn"),
+      "eins zwei drei vier fünf sechs sieben acht neun zehn elf zwölf",
+    );
+    assert.equal(focusedSpeechLead("   "), "");
   });
 
   it("bounds recent pane text by lines and UTF-8 bytes", () => {

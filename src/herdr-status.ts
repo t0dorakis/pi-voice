@@ -57,6 +57,14 @@ export interface PiTitleUpdate {
   previousAutoTitle?: string;
 }
 
+export interface PiFocusedSpeech {
+  paneId: string;
+  sessionPath: string;
+  runToken: string;
+  text: string;
+  writtenAt: number;
+}
+
 export function parseStatusEvent(raw: string | undefined): HerdrStatusEvent | null {
   if (!raw) return null;
   try {
@@ -237,4 +245,19 @@ export function readJsonFile<T>(path: string): T | null {
 
 export function piTitleUpdatePath(directory: string, sessionPath: string): string {
   return resolve(directory, `${stablePathKey(sessionPath)}.json`);
+}
+
+export function piFocusedSpeechPath(
+  directory: string,
+  paneId: string,
+  sessionPath: string,
+): string {
+  return resolve(directory, `${stablePathKey(`${paneId}\0${sessionPath}`)}.json`);
+}
+
+export function focusedSpeechLead(text: string, maxWords = 12): string {
+  const normalized = text.replace(/\s+/gu, " ").trim();
+  if (!normalized) return "";
+  const sentence = normalized.split(/(?<=[.!?])\s/u, 1)[0] ?? normalized;
+  return sentence.split(" ").slice(0, maxWords).join(" ");
 }
