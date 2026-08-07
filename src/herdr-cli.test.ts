@@ -78,6 +78,9 @@ describe("Herdr event orchestration", () => {
         calls.push(`tts:${text}`);
         return Buffer.from("fake wav");
       },
+      async playPing() {
+        calls.push("ping");
+      },
       async play(path) {
         calls.push("play");
         assert.equal(statSync(path).mode & 0o777, 0o600);
@@ -94,6 +97,8 @@ describe("Herdr event orchestration", () => {
 
     assert.ok(calls.includes("pane read w1:p2 --source recent-unwrapped --lines 80 --format text"));
     assert.ok(calls.includes("summary:80"));
+    assert.ok(calls.includes("ping"));
+    assert.ok(calls.includes("tts:Der Agent Alle Tests abgeschlossen ist fertig."));
     assert.ok(calls.includes("play"));
     assert.ok(calls.includes("rename:w1:p2:Alle Tests abgeschlossen"));
     const paneState = JSON.parse(
@@ -155,6 +160,7 @@ describe("Herdr event orchestration", () => {
         spoke = true;
         return Buffer.alloc(0);
       },
+      async playPing() {},
       async play() {
         spoke = true;
       },
@@ -219,6 +225,9 @@ describe("Herdr event orchestration", () => {
       async synthesize() {
         return Buffer.from("fake wav");
       },
+      async playPing() {
+        throw new Error("focused panes must not ping");
+      },
       async play() {
         played = true;
       },
@@ -255,6 +264,7 @@ describe("Herdr event orchestration", () => {
       async synthesize() {
         return Buffer.alloc(0);
       },
+      async playPing() {},
       async play() {},
       async renamePane() {},
       async renameWorkspace() {},
