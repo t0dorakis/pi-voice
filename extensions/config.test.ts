@@ -90,6 +90,11 @@ describe("saveConfig", () => {
         ...DEFAULT_CONFIG.chatterbox,
         referenceAudio: "/tmp/reference.wav",
       },
+      herdr: {
+        enabled: true,
+        model: { provider: "openai-codex", id: "gpt-5.6-luna" },
+        piTitleBridge: true,
+      },
     };
     saveConfig(config, configPath);
     const raw = JSON.parse(readFileSync(configPath, "utf-8"));
