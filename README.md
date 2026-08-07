@@ -150,7 +150,7 @@ pi-voice herdr status
 pi-voice herdr test "Controlled text to summarize and speak"
 ```
 
-`herdr setup` enables the bridge in `~/.pi/voice/config.json`, pins the summarizer, and runs `herdr plugin link` for this package. It deliberately does **not** change Herdr sounds or existing pi-voice exact automatic speech. The plugin never uses an API key fallback or Kokoro. Temporary audio is user-only and deleted after playback.
+`herdr setup` enables the bridge in `~/.pi/voice/config.json`, pins the summarizer, enables focused fast speech and Chatterbox prewarming, disables pi-voice automatic speech/events to prevent duplicate playback, and runs `herdr plugin link` for this package. It does not change Herdr's own sound setting. The plugin never uses an API key fallback or Kokoro. Temporary audio and focused-response payloads are user-only and deleted after consumption/playback.
 
 Pane titles are concise task or feature labels, not completion messages. They change only when initially empty or when the model detects a material task change; a manually supplied or changed title is permanently respected for that pane state. For Pi panes, the separately auto-loaded bridge applies the same title to the matching path-backed Pi session only when its session name is empty or still equals the previous automatic title. It also reports Pi as working until `agent_settled`, so long tool and subagent runs do not appear idle. The bridge is inactive outside Herdr panes (`HERDR_ENV=1`).
 

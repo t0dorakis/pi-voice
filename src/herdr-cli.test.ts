@@ -1,10 +1,18 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { type EventOperations, runHerdrEvent } from "./herdr-cli.ts";
-import { piTitleUpdatePath, stablePathKey } from "./herdr-status.ts";
+import { piFocusedSpeechPath, piTitleUpdatePath, stablePathKey } from "./herdr-status.ts";
 
 const homes: string[] = [];
 const originalHome = process.env.HOME;
@@ -17,7 +25,9 @@ function home(): string {
   mkdirSync(voice, { recursive: true });
   writeFileSync(
     resolve(voice, "config.json"),
-    JSON.stringify({ herdr: { enabled: true, piTitleBridge: true } }),
+    JSON.stringify({
+      herdr: { enabled: true, piTitleBridge: true, fastFocusedSpeech: true },
+    }),
   );
   return path;
 }
@@ -181,9 +191,27 @@ describe("Herdr event orchestration", () => {
     assert.equal(spoke, false);
   });
 
-  it("names and speaks focused single-pane workspaces", async () => {
+  it("speaks a trusted exact lead before naming focused single-pane workspaces", async () => {
     const tempHome = home();
+    const sessionPath = resolve(tempHome, "focused-session.jsonl");
+    const speechPath = piFocusedSpeechPath(
+      resolve(tempHome, ".pi", "voice", "herdr", "pi-focused-speech"),
+      "w1:p2",
+      sessionPath,
+    );
+    mkdirSync(resolve(speechPath, ".."), { recursive: true });
+    writeFileSync(
+      speechPath,
+      JSON.stringify({
+        paneId: "w1:p2",
+        sessionPath,
+        runToken: "test-run-token",
+        text: "Die fokussierte Antwort ist jetzt schnell hörbar. Weitere Details folgen.",
+        writtenAt: Date.now(),
+      }),
+    );
     let summarized = false;
+    const synthesized: string[] = [];
     let played = false;
     let renamed = false;
     let workspaceRenamed = false;
@@ -206,6 +234,7 @@ describe("Herdr event orchestration", () => {
                 focused: true,
                 agent: "pi",
                 agent_status: "idle",
+                agent_session: { agent: "pi", kind: "path", value: sessionPath },
               },
             },
           });
@@ -222,7 +251,8 @@ describe("Herdr event orchestration", () => {
         });
       },
       async startChatterbox() {},
-      async synthesize() {
+      async synthesize(text) {
+        synthesized.push(text);
         return Buffer.from("fake wav");
       },
       async playPing() {
@@ -242,6 +272,80 @@ describe("Herdr event orchestration", () => {
     assert.equal(summarized, true);
     assert.equal(renamed, true);
     assert.equal(workspaceRenamed, true);
+    assert.deepEqual(synthesized, ["Die fokussierte Antwort ist jetzt schnell hörbar."]);
+    assert.equal(existsSync(speechPath), false);
+    assert.equal(played, true);
+  });
+
+  it("continues through Luna naming and speech when the focused fast path fails", async () => {
+    const tempHome = home();
+    const sessionPath = resolve(tempHome, "fallback-session.jsonl");
+    const speechPath = piFocusedSpeechPath(
+      resolve(tempHome, ".pi", "voice", "herdr", "pi-focused-speech"),
+      "w1:p2",
+      sessionPath,
+    );
+    mkdirSync(resolve(speechPath, ".."), { recursive: true });
+    writeFileSync(
+      speechPath,
+      JSON.stringify({
+        paneId: "w1:p2",
+        sessionPath,
+        runToken: "fallback-run",
+        text: "Die schnelle Ausgabe schlägt kontrolliert fehl.",
+        writtenAt: Date.now(),
+      }),
+    );
+    const synthesized: string[] = [];
+    let renamed = false;
+    let played = false;
+    const operations: EventOperations = {
+      async run(_command, args) {
+        if (args[1] === "get") {
+          return JSON.stringify({
+            result: {
+              pane: {
+                pane_id: "w1:p2",
+                focused: true,
+                agent: "pi",
+                agent_status: "idle",
+                agent_session: { agent: "pi", kind: "path", value: sessionPath },
+              },
+            },
+          });
+        }
+        return "Die Implementierung ist vollständig getestet.";
+      },
+      async summarize() {
+        return JSON.stringify({
+          announcement: "Die sichere Luna-Ausgabe übernimmt nach dem Fehler erfolgreich.",
+          title: "Sichere Sprachfallbacks implementieren",
+          rename: true,
+        });
+      },
+      async startChatterbox() {},
+      async synthesize(text) {
+        synthesized.push(text);
+        if (synthesized.length === 1) throw new Error("fast synthesis failed");
+        return Buffer.from("fallback wav");
+      },
+      async playPing() {
+        throw new Error("focused fallback must not ping");
+      },
+      async play() {
+        played = true;
+      },
+      async renamePane() {
+        renamed = true;
+      },
+      async renameWorkspace() {},
+    };
+    await runHerdrEvent(event("idle", resolve(tempHome, "state")), operations);
+    assert.deepEqual(synthesized, [
+      "Die schnelle Ausgabe schlägt kontrolliert fehl.",
+      "Die sichere Luna-Ausgabe übernimmt nach dem Fehler erfolgreich.",
+    ]);
+    assert.equal(renamed, true);
     assert.equal(played, true);
   });
 

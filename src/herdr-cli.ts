@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   unlinkSync,
@@ -19,15 +20,18 @@ import {
   boundedRecentText,
   decidePaneRename,
   ELIGIBLE_STATUSES,
+  focusedSpeechLead,
   HERDR_MODEL,
   type HerdrPane,
   isDefaultWorkspaceLabel,
   type PaneTitleState,
+  type PiFocusedSpeech,
   type PiTitleUpdate,
   parseAnnouncement,
   parsePaneResponse,
   parseStatusEvent,
   parseWorkspaceResponse,
+  piFocusedSpeechPath,
   piTitleUpdatePath,
   readJsonFile,
   stablePathKey,
@@ -41,6 +45,8 @@ interface HerdrConfig {
   enabled?: boolean;
   model?: { provider?: string; id?: string };
   piTitleBridge?: boolean;
+  fastFocusedSpeech?: boolean;
+  prewarmFocused?: boolean;
 }
 
 interface VoiceConfig {
@@ -366,6 +372,7 @@ function paneMatchesStatus(
 async function speakAnnouncement(
   announcement: string,
   pingFirst: boolean,
+  expectedFocused: boolean,
   paneId: string,
   eventStatus: string,
   env: NodeJS.ProcessEnv,
@@ -373,22 +380,27 @@ async function speakAnnouncement(
   owner: OwnerRecord,
   operations: EventOperations,
   signal: AbortSignal,
-): Promise<void> {
+): Promise<boolean> {
   await operations.startChatterbox(signal);
-  if (!stillNewest(directory, owner)) return;
+  if (!stillNewest(directory, owner)) return false;
   const wav = await operations.synthesize(announcement, signal);
-  if (!stillNewest(directory, owner)) return;
+  if (!stillNewest(directory, owner)) return false;
   const latest = await currentPane(paneId, env, operations, signal);
-  if (!stillNewest(directory, owner) || !paneMatchesStatus(latest, paneId, eventStatus)) return;
+  if (
+    !stillNewest(directory, owner) ||
+    !paneMatchesStatus(latest, paneId, eventStatus) ||
+    latest.focused !== expectedFocused
+  )
+    return false;
   const temporary = mkdtempSync(resolve(tmpdir(), "pi-voice-herdr-"));
   const wavPath = resolve(temporary, "announcement.wav");
   try {
     writeFileSync(wavPath, wav, { mode: 0o600 });
     chmodSync(wavPath, 0o600);
-    if (!stillNewest(directory, owner)) return;
+    if (!stillNewest(directory, owner)) return false;
     if (pingFirst) {
       await operations.playPing(signal);
-      if (!stillNewest(directory, owner)) return;
+      if (!stillNewest(directory, owner)) return false;
     }
     await operations.play(wavPath, signal);
     console.log(
@@ -396,6 +408,7 @@ async function speakAnnouncement(
         ? "[pi-voice] Played background ping and named-agent status."
         : "[pi-voice] Played focused-pane settled summary.",
     );
+    return true;
   } finally {
     rmSync(temporary, { recursive: true, force: true });
   }
@@ -417,6 +430,67 @@ function updatePiTitle(pane: HerdrPane, title: string, previous?: string): void 
     piTitleUpdatePath(resolve(voiceDir(), "herdr", "pi-titles"), session.value),
     update,
   );
+}
+
+function consumeTrustedFocusedLead(pane: HerdrPane): string {
+  if (loadConfig().herdr?.fastFocusedSpeech !== true) return "";
+  const session = pane.agent_session;
+  if (pane.agent !== "pi" || session?.kind !== "path" || !session.value) return "";
+  const path = piFocusedSpeechPath(
+    resolve(voiceDir(), "herdr", "pi-focused-speech"),
+    pane.pane_id,
+    session.value,
+  );
+  const consuming = `${path}.${process.pid}.${randomUUID()}.consume`;
+  try {
+    renameSync(path, consuming);
+  } catch {
+    return "";
+  }
+  try {
+    const payload = readJsonFile<PiFocusedSpeech>(consuming);
+    const age = payload ? Date.now() - payload.writtenAt : Number.POSITIVE_INFINITY;
+    if (
+      !payload ||
+      payload.paneId !== pane.pane_id ||
+      payload.sessionPath !== session.value ||
+      typeof payload.runToken !== "string" ||
+      !payload.runToken ||
+      typeof payload.text !== "string" ||
+      !Number.isFinite(payload.writtenAt) ||
+      age < 0 ||
+      age > 10_000
+    )
+      return "";
+    return focusedSpeechLead(payload.text);
+  } finally {
+    try {
+      unlinkSync(consuming);
+    } catch {
+      // consumed payload already removed
+    }
+  }
+}
+
+async function waitForTrustedFocusedLead(pane: HerdrPane, signal: AbortSignal): Promise<string> {
+  if (pane.agent !== "pi" || loadConfig().herdr?.fastFocusedSpeech !== true) return "";
+  signal.throwIfAborted();
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const lead = consumeTrustedFocusedLead(pane);
+    if (lead) return lead;
+    await new Promise<void>((fulfill, reject) => {
+      const onAbort = () => {
+        clearTimeout(timeout);
+        reject(new DOMException("Aborted", "AbortError"));
+      };
+      const timeout = setTimeout(() => {
+        signal.removeEventListener("abort", onAbort);
+        fulfill();
+      }, 25);
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+  return "";
 }
 
 export async function runHerdrEvent(
@@ -496,6 +570,33 @@ export async function runHerdrEvent(
     const statePath = paneStatePath(directory, pane.pane_id);
     const prior = readJsonFile<PaneTitleState>(statePath) ?? {};
     const initialTitle = pane.label ?? pane.title;
+    const lead =
+      pane.focused && eventStatus !== "blocked"
+        ? await waitForTrustedFocusedLead(pane, abort.signal)
+        : "";
+    let focusedLeadPlayed = false;
+    if (lead) {
+      try {
+        focusedLeadPlayed = await speakAnnouncement(
+          lead,
+          false,
+          true,
+          event.paneId,
+          eventStatus,
+          env,
+          directory,
+          owner,
+          operations,
+          abort.signal,
+        );
+      } catch (error) {
+        if (abort.signal.aborted) throw error;
+        console.warn(
+          `[pi-voice] Focused fast speech failed; using Luna fallback: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    if (!stillNewest(directory, owner)) return;
     const raw = await operations.summarize(
       excerpt,
       prior.lastAutoTitle ?? initialTitle,
@@ -566,9 +667,11 @@ export async function runHerdrEvent(
       : eventStatus === "blocked"
         ? `Der Agent ${announcement.title} benötigt deine Aufmerksamkeit.`
         : `Der Agent ${announcement.title} ist fertig.`;
+    if (focusedLeadPlayed) return;
     await speakAnnouncement(
       speech,
       !latest.focused,
+      latest.focused,
       event.paneId,
       eventStatus,
       env,
@@ -594,7 +697,11 @@ async function setup(env: NodeJS.ProcessEnv): Promise<void> {
     enabled: true,
     model: { provider: "openai-codex", id: HERDR_MODEL },
     piTitleBridge: true,
+    fastFocusedSpeech: true,
+    prewarmFocused: true,
   };
+  config.autoSpeak = "off";
+  delete config.events;
   atomicWriteJson(configPath(), config);
   await runChild(
     env.HERDR_BIN_PATH || "herdr",
@@ -602,7 +709,7 @@ async function setup(env: NodeJS.ProcessEnv): Promise<void> {
     new AbortController().signal,
   );
   console.log("Herdr spoken status enabled and local plugin linked.");
-  console.log("Existing Herdr sounds and pi-voice automatic speech were left unchanged.");
+  console.log("pi-voice automatic speech disabled to prevent duplicate playback.");
 }
 
 async function status(env: NodeJS.ProcessEnv): Promise<void> {

@@ -48,6 +48,8 @@ export interface HerdrConfig {
   enabled: boolean;
   model: ModelConfig;
   piTitleBridge: boolean;
+  fastFocusedSpeech?: boolean;
+  prewarmFocused?: boolean;
 }
 
 export interface FullVoiceConfig {
@@ -112,6 +114,8 @@ const _VoiceConfigSchema = Type.Object({
       enabled: Type.Boolean(),
       model: ModelSchema,
       piTitleBridge: Type.Boolean(),
+      fastFocusedSpeech: Type.Optional(Type.Boolean()),
+      prewarmFocused: Type.Optional(Type.Boolean()),
     }),
   ),
   events: Type.Optional(Type.Record(Type.String(), EventConfigSchema)),
